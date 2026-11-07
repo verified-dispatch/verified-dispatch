@@ -2,10 +2,13 @@ package gitx
 
 import (
 	"context"
+	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initRepo creates a repository with one commit and returns its path.
@@ -95,5 +98,28 @@ func TestBaseEnvDropsGitVariablesAndAddsFixedOnes(t *testing.T) {
 		if !found {
 			t.Fatalf("BaseEnv lacks %q", want)
 		}
+	}
+}
+
+// fakeGitOnPath puts a `git` script first on PATH that execs the given body.
+func fakeGitOnPath(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "git")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestRunTimesOutAndReportsErrTimeout(t *testing.T) {
+	fakeGitOnPath(t, "exec sleep 5")
+	start := time.Now()
+	_, err := (Runner{Timeout: 200 * time.Millisecond}).Run(context.Background(), "status")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("Run took %s, want it to return near the timeout", took)
 	}
 }
