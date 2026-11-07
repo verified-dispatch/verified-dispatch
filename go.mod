@@ -1,3 +1,3 @@
-module github.com/eparenti/verified-dispatch
+module github.com/verified-dispatch/verified-dispatch
 
 go 1.26
