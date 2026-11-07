@@ -1,0 +1,14 @@
+# Build output
+/dist/
+/vdispatch
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
