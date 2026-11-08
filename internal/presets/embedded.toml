@@ -1,0 +1,13 @@
+# Builder presets built into vdispatch. The home config can add presets or
+# replace these by name. Either may be named by a repository config.
+
+[presets.claude-code]
+command = ["claude", "-p", "--permission-mode", "acceptEdits", "--output-format", "json"]
+prompt = "stdin"
+cost = "claude-code-json"
+repo_selectable = true
+
+[presets.codex]
+command = ["codex", "exec", "--full-auto", "-"]
+prompt = "stdin"
+repo_selectable = true
