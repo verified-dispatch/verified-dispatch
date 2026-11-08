@@ -9,21 +9,28 @@ import (
 	"strings"
 )
 
-// ParseZ splits NUL-terminated git output into entries. The final
-// terminator produces no extra entry; a doubled NUL (as git status
-// --porcelain=v2 -z uses for renames) yields an empty entry that callers
-// must expect.
-func ParseZ(out []byte) []string {
+// ErrTruncated is returned when NUL-separated output does not end in NUL,
+// which means the producer was cut off.
+var ErrTruncated = errors.New("gitx: NUL-separated output is truncated")
+
+// ParseZ splits NUL-terminated git output into entries. Empty output gives
+// no entries. Output that does not end in NUL is truncated and is an
+// error. Entries are returned in order; callers that read paired records
+// (such as a rename's two paths from status --porcelain=v2 -z) consume
+// consecutive entries themselves.
+func ParseZ(out []byte) ([]string, error) {
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	out = bytes.TrimSuffix(out, []byte{0})
-	parts := bytes.Split(out, []byte{0})
+	if out[len(out)-1] != 0 {
+		return nil, ErrTruncated
+	}
+	parts := bytes.Split(out[:len(out)-1], []byte{0})
 	entries := make([]string, len(parts))
 	for i, p := range parts {
 		entries[i] = string(p)
 	}
-	return entries
+	return entries, nil
 }
 
 // The oldest git the tool accepts. GIT_NO_LAZY_FETCH arrived in 2.44; older

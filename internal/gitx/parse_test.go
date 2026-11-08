@@ -8,7 +8,10 @@ import (
 )
 
 func TestParseZSplitsOnNulAndDropsTrailingEmpty(t *testing.T) {
-	got := ParseZ([]byte("a/b.txt\x00dir/with space\x00\x00"))
+	got, err := ParseZ([]byte("a/b.txt\x00dir/with space\x00\x00"))
+	if err != nil {
+		t.Fatalf("ParseZ: %v", err)
+	}
 	want := []string{"a/b.txt", "dir/with space", ""}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ParseZ = %q, want %q", got, want)
@@ -16,18 +19,35 @@ func TestParseZSplitsOnNulAndDropsTrailingEmpty(t *testing.T) {
 }
 
 func TestParseZEmptyInputGivesNoEntries(t *testing.T) {
-	if got := ParseZ(nil); len(got) != 0 {
+	got, err := ParseZ(nil)
+	if err != nil {
+		t.Fatalf("ParseZ(nil): %v", err)
+	}
+	if len(got) != 0 {
 		t.Fatalf("ParseZ(nil) = %q, want empty", got)
 	}
-	if got := ParseZ([]byte("\x00")); !reflect.DeepEqual(got, []string{""}) {
+	got, err = ParseZ([]byte("\x00"))
+	if err != nil {
+		t.Fatalf("ParseZ(NUL): %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{""}) {
 		t.Fatalf("ParseZ(NUL) = %q, want one empty entry", got)
 	}
 }
 
 func TestParseZKeepsNewlinesInsidePaths(t *testing.T) {
-	got := ParseZ([]byte("odd\nname\x00"))
+	got, err := ParseZ([]byte("odd\nname\x00"))
+	if err != nil {
+		t.Fatalf("ParseZ: %v", err)
+	}
 	if !reflect.DeepEqual(got, []string{"odd\nname"}) {
 		t.Fatalf("ParseZ = %q, want the newline kept", got)
+	}
+}
+
+func TestParseZRejectsOutputWithoutTrailingNul(t *testing.T) {
+	if _, err := ParseZ([]byte("a\x00b")); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("err = %v, want ErrTruncated", err)
 	}
 }
 
