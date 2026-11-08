@@ -350,6 +350,3 @@ func checkPatterns(key string, patterns []string) error {
 	}
 	return nil
 }
-
-// RepoFile is the repository configuration path, relative to the top level.
-const RepoFile = ".vdispatch.toml"

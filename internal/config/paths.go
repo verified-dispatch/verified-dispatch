@@ -1,0 +1,59 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+)
+
+// HomePath returns the home config path for goos, reading the environment
+// through getenv: $XDG_CONFIG_HOME/vdispatch/config.toml on Linux (falling
+// back to ~/.config when the variable is unset or not absolute), and
+// ~/Library/Application Support/vdispatch/config.toml on macOS.
+func HomePath(goos string, getenv func(string) string) (string, error) {
+	home := getenv("HOME")
+	if goos == "darwin" {
+		if home == "" {
+			return "", errors.New("config: HOME is not set")
+		}
+		return filepath.Join(home, "Library", "Application Support", "vdispatch", "config.toml"), nil
+	}
+	if x := getenv("XDG_CONFIG_HOME"); x != "" && filepath.IsAbs(x) {
+		return filepath.Join(x, "vdispatch", "config.toml"), nil
+	}
+	if home == "" {
+		return "", errors.New("config: neither XDG_CONFIG_HOME nor HOME is set")
+	}
+	return filepath.Join(home, ".config", "vdispatch", "config.toml"), nil
+}
+
+// DefaultHomePath returns HomePath for this process.
+func DefaultHomePath() (string, error) {
+	return HomePath(runtime.GOOS, os.Getenv)
+}
+
+// ReadHome reads the home config. A missing file is not an error and
+// returns nil. A file over ConfigFileBytes, or a path that is not a regular
+// file, is an error.
+func ReadHome(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("home config: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("home config %s is not a regular file", path)
+	}
+	if info.Size() > ConfigFileBytes {
+		return nil, fmt.Errorf("home config %s is larger than %d bytes", path, ConfigFileBytes)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("home config: %w", err)
+	}
+	return data, nil
+}
