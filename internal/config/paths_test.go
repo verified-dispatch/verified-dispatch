@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -67,27 +66,7 @@ func TestReadHome(t *testing.T) {
 			t.Fatalf("mode %o: err = %v, want an error about other writers", mode, err)
 		}
 	}
-	// Group write is allowed only for the owner's private group, whose id
-	// equals the owner's user id.
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := info.Sys().(*syscall.Stat_t)
-	privateGroup := st.Gid == st.Uid
-	for _, mode := range []os.FileMode{0o660, 0o664} {
-		if err := os.Chmod(path, mode); err != nil {
-			t.Fatal(err)
-		}
-		_, err := ReadHome(path)
-		if privateGroup && err != nil {
-			t.Fatalf("mode %o with a private group: err = %v, want nil", mode, err)
-		}
-		if !privateGroup && (err == nil || !strings.Contains(err.Error(), "private group")) {
-			t.Fatalf("mode %o with a shared group: err = %v, want an error about the group", mode, err)
-		}
-	}
-	for _, mode := range []os.FileMode{0o600, 0o644, 0o640} {
+	for _, mode := range []os.FileMode{0o600, 0o640, 0o644, 0o660, 0o664} {
 		if err := os.Chmod(path, mode); err != nil {
 			t.Fatal(err)
 		}

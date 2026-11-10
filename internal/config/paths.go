@@ -45,9 +45,8 @@ func DefaultHomePath() (string, error) {
 
 // ReadHome reads the home config. A missing file is not an error and
 // returns nil. A file over ConfigFileBytes, or a path that is not a regular
-// file, is an error. A file that others can write, that a group other than
-// the owner's private group can write, or that another user owns, is an
-// error, because this file sets the builder command.
+// file, is an error. A file that others can write, or that another user
+// owns, is an error, because this file sets the builder command.
 func ReadHome(path string) ([]byte, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -73,21 +72,17 @@ func ReadHome(path string) ([]byte, error) {
 }
 
 // checkPrivate refuses a home config that another user owns or that anyone
-// but its owner can write. Group write is allowed only when the file's
-// group is the owner's private group, a group whose id equals the owner's
-// user id. Systems that give each user such a group often use umask 002,
-// so 0664 is the normal mode there.
+// outside its owner's group can write. Group write is accepted: systems
+// that give each user a private group often use umask 002, so 0664 is the
+// normal mode there, and a shared group that can write this file can also
+// write the user's shell profile.
 func checkPrivate(path string, info os.FileInfo) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return nil
 	}
-	perm := info.Mode().Perm()
-	if perm&0o002 != 0 {
+	if info.Mode().Perm()&0o002 != 0 {
 		return fmt.Errorf("home config %s is writable by others; it sets the builder command, so only its owner may write it", path)
-	}
-	if perm&0o020 != 0 && st.Gid != st.Uid {
-		return fmt.Errorf("home config %s is writable by a group that is not your private group; it sets the builder command, so only its owner may write it", path)
 	}
 	if int(st.Uid) != os.Getuid() {
 		return fmt.Errorf("home config %s is owned by another user; it sets the builder command, so it must be yours", path)
