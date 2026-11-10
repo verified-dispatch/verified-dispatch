@@ -3,7 +3,7 @@ SHELL := bash
 
 STATICCHECK := go run honnef.co/go/tools/cmd/staticcheck@v0.8.2
 
-.PHONY: gate fmt vet lint test
+.PHONY: gate fmt vet lint test race
 
 ## gate: the one command run before every commit
 gate: fmt vet lint test
@@ -20,3 +20,6 @@ lint:
 
 test:
 	go test ./...
+
+race:
+	go test -race ./internal/procs/
