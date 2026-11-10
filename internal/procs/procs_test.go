@@ -286,3 +286,72 @@ func TestDisableAttachSucceeds(t *testing.T) {
 		t.Fatalf("helper printed %q, want ok", out)
 	}
 }
+
+func TestDescendantsListsABackgroundProcessTheChildLeft(t *testing.T) {
+	var out bytes.Buffer
+	p := startFixture(t, "leave-background.sh", Spec{Stdout: &out})
+	waitFor(t, p, 10*time.Second)
+	left, err := strconv.Atoi(strings.TrimSpace(out.String()))
+	if err != nil {
+		t.Fatalf("stdout = %q", out.String())
+	}
+	ds := descendantsSoon(t, p, left, 3*time.Second)
+	if !contains(ds, left) {
+		t.Fatalf("Descendants = %v, want it to include %d", ds, left)
+	}
+	if contains(ds, p.Pid()) {
+		t.Fatalf("Descendants = %v includes the child itself", ds)
+	}
+}
+
+func TestDescendantsIsEmptyForAChildThatLeftNothing(t *testing.T) {
+	p := startFixture(t, "exit-code.sh", Spec{})
+	waitFor(t, p, 10*time.Second)
+	ds, err := p.Descendants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ds) != 0 {
+		t.Fatalf("Descendants = %v, want none", ds)
+	}
+}
+
+func TestDescendantsListsALiveChildsHelpers(t *testing.T) {
+	// bash running sleep-long.sh execs sleep, so the child is one process;
+	// hold-stdout.sh leaves a sleep whose parent chain reaches the child
+	// while the child is still being waited for.
+	var out bytes.Buffer
+	p := startFixture(t, "hold-stdout.sh", Spec{Stdout: &out})
+	waitFor(t, p, 20*time.Second)
+	holder, _ := strconv.Atoi(strings.TrimSpace(out.String()))
+	ds := descendantsSoon(t, p, holder, 3*time.Second)
+	if !contains(ds, holder) {
+		t.Fatalf("Descendants = %v, want %d", ds, holder)
+	}
+}
+
+func contains(xs []int, x int) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// descendantsSoon polls Descendants until it includes want or d passes,
+// because a reparenting or a poll tick can lag the child's exit.
+func descendantsSoon(t *testing.T, p *Process, want int, d time.Duration) []int {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		ds, err := p.Descendants()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if contains(ds, want) || time.Now().After(deadline) {
+			return ds
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
