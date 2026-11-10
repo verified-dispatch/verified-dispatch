@@ -29,6 +29,27 @@ jobs:
       - run: git --version
       - run: make test race
 
+  test-cgroup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Run the tests inside a cgroup this user may write
+        run: |
+          sudo mkdir /sys/fs/cgroup/vdispatch-ci
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/vdispatch-ci
+          echo $$ | sudo tee /sys/fs/cgroup/vdispatch-ci/cgroup.procs >/dev/null
+          make test race
+          log="$RUNNER_TEMP/cgroup-tests.log"
+          go test -count=1 -run 'Cgroup' -v ./internal/procs/ > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          if grep -q -e '--- SKIP' "$log"; then
+            echo "the cgroup tests skipped; the cgroup path did not run"
+            exit 1
+          fi
+
   test-macos:
     runs-on: macos-15
     steps:
