@@ -35,11 +35,11 @@ func (o TeardownOptions) withDefaults() TeardownOptions {
 
 // TeardownResult says what a teardown did.
 type TeardownResult struct {
-	// Killed counts the processes other than the child itself that were
+	// Leftovers counts the processes other than the child itself that were
 	// alive when teardown started after the child had exited, or that had
 	// to be killed one by one. Above zero means the child left work
 	// running, which the contract forbids.
-	Killed int
+	Leftovers int
 	// Remaining lists the processes still alive when the bound expired.
 	Remaining []int
 	// Complete is true when nothing remains.
@@ -51,7 +51,7 @@ type TeardownResult struct {
 // simulate a process that will not die.
 var (
 	listFn = func(p *Process) ([]int, error) { return p.Descendants() }
-	killFn = syscall.Kill
+	killFn = func(p *Process, pid int, sig syscall.Signal) error { return p.tr.kill(pid, sig) }
 )
 
 // Teardown ends the child and everything it left behind, within the bound:
@@ -66,14 +66,14 @@ func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 
 	// Work the child left behind is counted before any signal, while the
 	// group kill has not yet taken it.
-	if p.Exited() {
+	if p.childDone() {
 		if ds, err := listFn(p); err == nil {
 			for _, pid := range ds {
 				killed[pid] = true
 			}
 		}
 	} else {
-		_ = killFn(-p.pid, syscall.SIGTERM)
+		p.tr.killGroup(syscall.SIGTERM)
 		grace := time.NewTimer(opts.TermGrace)
 		select {
 		case <-p.done:
@@ -81,7 +81,7 @@ func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 		}
 		grace.Stop()
 	}
-	_ = killFn(-p.pid, syscall.SIGKILL)
+	p.tr.killGroup(syscall.SIGKILL)
 
 	var remaining, refused []int
 	for {
@@ -92,7 +92,7 @@ func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 		}
 		if ds, err := listFn(p); err == nil {
 			for _, pid := range ds {
-				err := killFn(pid, syscall.SIGKILL)
+				err := killFn(p, pid, syscall.SIGKILL)
 				switch {
 				case err == nil:
 					killed[pid] = true
@@ -117,7 +117,7 @@ func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 		delete(killed, pid)
 	}
 	p.Close()
-	res := TeardownResult{Killed: len(killed), Elapsed: time.Since(start)}
+	res := TeardownResult{Leftovers: len(killed), Elapsed: time.Since(start)}
 	if len(remaining) == 0 {
 		res.Complete = true
 	} else {

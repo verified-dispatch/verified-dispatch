@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -59,16 +60,39 @@ type Process struct {
 	release   chan struct{} // closed to let the forking thread go
 	status    Status
 	waitErr   error
-	plat      *platformState
-	//lint:ignore U1000 only the darwin Close uses it; Linux has nothing to release.
+	tr        *tracker // platform tracking of the child and its descendants
+	obs       *observer
 	closeOnce sync.Once
 }
 
+// live is the registry of children this package started and has not torn
+// down. A scan for one child never attributes another live child, or a
+// process in another live child's session, and never reaps a live child.
+var live = struct {
+	sync.Mutex
+	m map[int]bool
+}{m: map[int]bool{}}
+
+func liveHas(pid int) bool {
+	live.Lock()
+	defer live.Unlock()
+	return live.m[pid]
+}
+
 // Start runs spec in a new session and process group. It returns once the
-// child has started.
+// child has started. The caller must end with Teardown, or Close when it
+// has waited and has nothing to tear down.
 func Start(spec Spec) (*Process, error) {
 	if len(spec.Argv) == 0 {
 		return nil, errors.New("procs: empty argv")
+	}
+	if spec.Dir != "" {
+		if _, err := os.Stat(spec.Dir); err != nil {
+			return nil, fmt.Errorf("procs: directory %s: %w", spec.Dir, err)
+		}
+	}
+	if err := ensureSubreaper(); err != nil {
+		return nil, err
 	}
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
@@ -96,7 +120,16 @@ func Start(spec Spec) (*Process, error) {
 		// thread and holds it until the child has exited, so the signal
 		// means what the receipt says: the child dies when the tool dies.
 		runtime.LockOSThread()
+		// The registry lock is held from the fork until the pid is
+		// registered. A scan checks the registry only after it has read
+		// the process table, so a child it saw there is registered by
+		// then and is never attributed to another child or reaped.
+		live.Lock()
 		err := cmd.Start()
+		if err == nil {
+			live.m[cmd.Process.Pid] = true
+		}
+		live.Unlock()
 		started <- err
 		if err == nil {
 			<-p.release
@@ -108,13 +141,16 @@ func Start(spec Spec) (*Process, error) {
 	}
 	p.pid = cmd.Process.Pid
 	p.startedAt = time.Now()
-	p.plat = startPlatform(p)
+	// The tracker reads the child's start time before anything can reap
+	// it: the wait goroutine has not started yet.
+	p.tr = newTracker(p)
 	go func() {
 		err := cmd.Wait()
 		p.status, p.waitErr = statusOf(cmd.ProcessState, err)
 		close(p.done)
 		close(p.release)
 	}()
+	p.obs = startObserver(p)
 	return p, nil
 }
 
@@ -160,4 +196,85 @@ func (p *Process) Exited() bool {
 	default:
 		return false
 	}
+}
+
+// observer refreshes the child's tree every second so processes are
+// tracked while their parent chain still exists. Without it a process
+// whose parent exits between two listings would be seen only through the
+// subreaper rule on Linux, and not at all on macOS.
+type observer struct {
+	stop    chan struct{}
+	stopped chan struct{}
+}
+
+// pollInterval is how often the observer scans. Containment states it.
+const pollInterval = time.Second
+
+func startObserver(p *Process) *observer {
+	o := &observer{stop: make(chan struct{}), stopped: make(chan struct{})}
+	go func() {
+		defer close(o.stopped)
+		t := time.NewTicker(pollInterval)
+		defer t.Stop()
+		_, _, _ = scanFn(p)
+		for {
+			select {
+			case <-o.stop:
+				return
+			case <-t.C:
+				_, _, _ = scanFn(p)
+			}
+		}
+	}()
+	return o
+}
+
+// Close stops the observer and removes the child from the registry. It is
+// safe to call more than once. Teardown calls it.
+func (p *Process) Close() {
+	p.closeOnce.Do(func() {
+		if p.obs != nil {
+			close(p.obs.stop)
+			<-p.obs.stopped
+		}
+		live.Lock()
+		delete(live.m, p.pid)
+		live.Unlock()
+	})
+}
+
+// liveProc is one running process found by a scan.
+type liveProc struct {
+	pid  int
+	pgid int
+}
+
+// scanFn is the platform scan, replaced in tests that simulate a listing
+// failure. It returns the running processes attributed to the child with
+// their group ids, how many zombies it reaped, and an error when the
+// process table could not be read.
+var scanFn = func(p *Process) ([]liveProc, int, error) { return p.tr.scan(p) }
+
+// Descendants lists the running processes attributed to the child, by
+// pid, sorted. The child itself is not listed. An error means the process
+// table could not be read; callers must treat that as unknown, never as
+// empty.
+func (p *Process) Descendants() ([]int, error) {
+	alive, _, err := scanFn(p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int, 0, len(alive))
+	for _, lp := range alive {
+		out = append(out, lp.pid)
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
+// childDone reports whether the child has ended: waited for, or shown by
+// the process table as exited or gone. The second form matters during the
+// pipe cut after exit, when Wait has not returned yet.
+func (p *Process) childDone() bool {
+	return p.Exited() || !p.tr.childAlive()
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,13 +41,16 @@ func startFixture(t *testing.T, name string, spec Spec) *Process {
 	if spec.Env == nil {
 		spec.Env = baseEnv()
 	}
+	spec.Env = append(spec.Env, "PROCS_TESTBIN="+os.Args[0], "PROCS_SCRATCH="+t.TempDir())
 	p, err := Start(spec)
 	if err != nil {
 		t.Fatalf("Start(%s): %v", name, err)
 	}
-	t.Cleanup(func() { p.Teardown(TeardownOptions{TermGrace: 200 * time.Millisecond, Bound: 5 * time.Second}) })
+	t.Cleanup(func() { p.Teardown(quick) })
 	return p
 }
+
+var quick = TeardownOptions{TermGrace: 300 * time.Millisecond, Bound: 5 * time.Second}
 
 func waitFor(t *testing.T, p *Process, d time.Duration) Status {
 	t.Helper()
@@ -117,7 +121,7 @@ func TestStartWithNilEnvGivesAnEmptyEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { p.Teardown(TeardownOptions{TermGrace: 200 * time.Millisecond, Bound: 5 * time.Second}) })
+	t.Cleanup(func() { p.Teardown(quick) })
 	waitFor(t, p, 10*time.Second)
 	if out.String() != "unset\nunset\n" {
 		t.Fatalf("stdout = %q, want nothing inherited", out.String())
@@ -317,9 +321,8 @@ func TestDescendantsIsEmptyForAChildThatLeftNothing(t *testing.T) {
 }
 
 func TestDescendantsListsALiveChildsHelpers(t *testing.T) {
-	// bash running sleep-long.sh execs sleep, so the child is one process;
-	// hold-stdout.sh leaves a sleep whose parent chain reaches the child
-	// while the child is still being waited for.
+	// hold-stdout.sh leaves a sleep whose parent chain reached the child;
+	// after the child exits the sleep is reparented and must still be found.
 	var out bytes.Buffer
 	p := startFixture(t, "hold-stdout.sh", Spec{Stdout: &out})
 	waitFor(t, p, 20*time.Second)
@@ -353,5 +356,83 @@ func descendantsSoon(t *testing.T, p *Process, want int, d time.Duration) []int 
 			return ds
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestTwoChildrenAreKeptApart(t *testing.T) {
+	a := startFixture(t, "sleep-long.sh", Spec{})
+	b := startFixture(t, "sleep-long.sh", Spec{})
+	ds, err := a.Descendants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(ds, b.Pid()) {
+		t.Fatalf("A.Descendants = %v lists sibling B %d", ds, b.Pid())
+	}
+	res := a.Teardown(quick)
+	if !res.Complete || res.Leftovers != 0 {
+		t.Fatalf("A.Teardown = %+v", res)
+	}
+	if !alive(b.Pid()) {
+		t.Fatal("tearing down A killed B")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := b.Wait(ctx); err != context.DeadlineExceeded {
+		t.Fatalf("B ended during A's teardown: %v", err)
+	}
+}
+
+func TestSiblingExitStatusIsNeverCollectedByAnotherChild(t *testing.T) {
+	a := startFixture(t, "sleep-long.sh", Spec{})
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = a.Descendants()
+			}
+		}
+	}()
+	tr, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("no true binary")
+	}
+	for i := 0; i < 200; i++ {
+		p, err := Start(Spec{Argv: []string{tr}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := p.Wait(context.Background())
+		if err != nil || st.ExitCode != 0 {
+			close(stop)
+			<-done
+			t.Fatalf("sibling %d: status %v err %v; its exit was collected by another child's scan", i, st, err)
+		}
+		p.Teardown(quick)
+	}
+	close(stop)
+	<-done
+}
+
+func TestDescendantsFailsClosedOnAListingError(t *testing.T) {
+	p := startFixture(t, "exit-code.sh", Spec{})
+	waitFor(t, p, 10*time.Second)
+	old := scanFn
+	t.Cleanup(func() { scanFn = old })
+	scanFn = func(p *Process) ([]liveProc, int, error) { return nil, 0, errors.New("table unreadable") }
+	if _, err := p.Descendants(); err == nil {
+		t.Fatal("Descendants hid a listing error")
+	}
+}
+
+func TestStartNamesAMissingDirectory(t *testing.T) {
+	_, err := Start(Spec{Argv: []string{"true"}, Dir: "/nonexistent/dir/for/procs"})
+	if err == nil || !strings.Contains(err.Error(), "/nonexistent/dir/for/procs") {
+		t.Fatalf("err = %v, want it to name the directory", err)
 	}
 }
