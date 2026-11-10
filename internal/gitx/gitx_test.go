@@ -297,3 +297,17 @@ func TestRunCapsOutput(t *testing.T) {
 		t.Fatalf("err = %v, want ErrOutputTooLarge", err)
 	}
 }
+
+func TestFixedConfigDisablesBackgroundMaintenance(t *testing.T) {
+	for _, want := range []string{"gc.auto=0", "maintenance.auto=false"} {
+		found := false
+		for _, c := range FixedConfig {
+			if c == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("FixedConfig lacks %q", want)
+		}
+	}
+}

@@ -49,6 +49,11 @@ var FixedConfig = []string{
 	"core.quotePath=false",
 	"core.commitGraph=false",
 	"core.multiPackIndex=false",
+	// Git may not start background maintenance from a command this tool
+	// runs: it would detach into a new session, be attributed to the
+	// running child, and change the object store during a run.
+	"gc.auto=0",
+	"maintenance.auto=false",
 }
 
 // DefaultTimeout bounds one git command when Runner.Timeout is zero.
