@@ -74,11 +74,22 @@ func dumpable() (int, error) {
 }
 
 // Containment is the receipt line that says how children are contained on
-// this platform and what is not covered.
-func Containment() string {
-	return "containment: session and process group, child subreaper, parent-death signal, descendants observed every second; " +
+// this platform and what is not covered, before any child has run. Each
+// child's own line, from Process.Containment, also says whether a cgroup
+// was in force for it.
+func Containment() string { return containmentFor(false) }
+
+// containmentFor is the receipt line with or without a cgroup.
+func containmentFor(cg bool) string {
+	mech := "session and process group, child subreaper, parent-death signal, descendants observed every second"
+	if cg {
+		mech = "cgroup (frozen then killed at teardown), " + mech
+	} else {
+		mech += ", no cgroup available"
+	}
+	return "containment: " + mech + "; " +
 		"not covered: work handed to a process outside the tool's view, a child that stops or kills the tool, " +
-		"a process that changes its pid faster than the process table is read"
+		"a process that leaves its cgroup and changes its pid faster than the process table is read"
 }
 
 // procInfo is what /proc/<pid>/stat says about one process.
@@ -177,10 +188,11 @@ func (t *tracker) childPid() int {
 }
 
 // scan builds the child's tree from one snapshot: the child while it is
-// the same process, every tracked process still the same process, and on
-// this platform every process reparented here from another session that
-// no other live child owns (how an orphan looks to a subreaper), then
-// everything below them by parent chain. True zombies this process
+// the same process, every tracked process still the same process, on this
+// platform every process reparented here from another session that no
+// other live child owns (how an orphan looks to a subreaper), and every
+// member of the child's cgroup when it has one, then everything below
+// them by parent chain. True zombies this process
 // parents and that are not live children are reaped. The walk is one pass
 // over a parent index, so the cost is linear in the table size.
 func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
@@ -228,6 +240,19 @@ func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
 		seed(pid)
 	}
 	live.Unlock()
+	// A process can leave its cgroup, so the cgroup adds to the rules
+	// above and never replaces them. A member missing from the snapshot
+	// exited between the two reads; the next pass sees it as a zombie or
+	// gone. Another live child is never attributed here.
+	if p.cg != nil {
+		if members, err := p.cg.members(); err == nil {
+			for _, pid := range members {
+				if _, ok := procs[pid]; ok && (pid == p.pid || !liveHas(pid)) {
+					seed(pid)
+				}
+			}
+		}
+	}
 	for len(queue) > 0 {
 		pid := queue[0]
 		queue = queue[1:]

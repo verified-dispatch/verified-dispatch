@@ -61,6 +61,9 @@ type TeardownResult struct {
 	// Complete is true when the table was quiet for quietPasses in a row.
 	Complete bool
 	Elapsed  time.Duration
+	// Note names a cleanup step that failed after the kills, such as a
+	// cgroup directory that could not be removed. Empty otherwise.
+	Note string
 }
 
 // killFn is the per-process kill, replaced in tests that simulate a
@@ -68,10 +71,11 @@ type TeardownResult struct {
 var killFn = func(p *Process, pid int, sig syscall.Signal) error { return p.tr.kill(pid, sig) }
 
 // Teardown ends the child and everything it left behind, within the bound.
-// SIGTERM goes to the process group, SIGKILL after the grace, then every
+// SIGTERM goes to the process group, SIGKILL after the grace, then the
+// child's cgroup, when it has one, is frozen and killed, then every
 // process still found is killed, pass after pass, until the table has
-// been quiet for several passes or the bound expires. It is safe to call
-// more than once.
+// been quiet for several passes or the bound expires. The cgroup is
+// removed last. It is safe to call more than once.
 func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 	opts = opts.withDefaults()
 	start := time.Now()
@@ -103,7 +107,20 @@ func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 		}
 		timer.Stop()
 		p.tr.killGroup(syscall.SIGKILL)
+		if p.cg != nil {
+			// The cgroup kill below ends everything before the passes
+			// can see it, so count what runs outside the child's group
+			// now, by the same rule the passes use.
+			if alive, _, err := scanFn(p); err == nil {
+				for _, lp := range alive {
+					if lp.pgid != p.pid {
+						leftovers[lp.pid] = true
+					}
+				}
+			}
+		}
 	}
+	p.preKill()
 
 	quiet := 0
 	unsettled := false
@@ -155,8 +172,12 @@ func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 	for pid := range refused {
 		delete(leftovers, pid)
 	}
+	var note string
+	if err := p.postKill(time.Until(deadline)); err != nil {
+		note = "cgroup not removed: " + err.Error()
+	}
 	p.Close()
-	res := TeardownResult{Leftovers: len(leftovers), Elapsed: time.Since(start)}
+	res := TeardownResult{Leftovers: len(leftovers), Elapsed: time.Since(start), Note: note}
 	if quiet >= quietPasses {
 		res.Complete = true
 	} else {
