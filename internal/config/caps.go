@@ -38,6 +38,10 @@ const (
 	MaxRunPatternInstructions = 20000
 	// MaxCommandBytes caps the gate and prepare commands.
 	MaxCommandBytes = 4096
+	// MaxPathBytes caps one path entry.
+	MaxPathBytes = 4096
+	// MaxPathEntries caps each path list per layer.
+	MaxPathEntries = 64
 )
 
 // DefaultPreset is the builder preset when no layer names one.
@@ -47,11 +51,15 @@ const DefaultPreset = "claude-code"
 func defaults() Resolved {
 	return Resolved{
 		Gate: Gate{
+			PrepareInputs:  []string{},
 			Minutes:        BuiltinCaps.GateMinutes,
 			PrepareMinutes: BuiltinCaps.GatePrepareMinutes,
 			Isolated:       true,
+			Protected:      []string{},
 		},
-		Builder: Builder{Preset: DefaultPreset},
+		Builder:   Builder{Preset: DefaultPreset},
+		Condense:  []string{},
+		Redaction: []string{},
 		Limits: Limits{
 			CommitStallMinutes: 20,
 			WallClockMinutes:   90,
