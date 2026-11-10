@@ -3,10 +3,13 @@
 package procs
 
 import (
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // checkOwnSession has no portable session id on macOS (ps prints a kernel
@@ -35,13 +38,28 @@ func isZombie(pid int) bool {
 // returning without error is the check.
 func checkAttachDisabled() error { return nil }
 
-func TestParsePsLineReadsStartTime(t *testing.T) {
-	procs := parsePs([]byte("  501     1   501 Ss   Mon Nov 10 09:15:02 2026\n 4242   501  4242 Z    Mon Nov 10 09:15:03 2026\n"))
-	a, ok := procs[501]
-	if !ok || a.ppid != 1 || a.pgid != 501 || a.start != "Mon Nov 10 09:15:02 2026" || a.zombie {
-		t.Fatalf("501 = %+v, %v", a, ok)
+func TestProcTableFromKinfo(t *testing.T) {
+	kp := []unix.KinfoProc{
+		{Proc: unix.ExternProc{P_pid: 501, P_stat: 2, P_starttime: unix.Timeval{Sec: 1700000000, Usec: 250}}, Eproc: unix.Eproc{Ppid: 1, Pgid: 501}},
+		{Proc: unix.ExternProc{P_pid: 4242, P_stat: 5, P_starttime: unix.Timeval{Sec: 1700000001, Usec: 0}}, Eproc: unix.Eproc{Ppid: 501, Pgid: 501}},
 	}
-	if z := procs[4242]; !z.zombie {
+	procs := fromKinfo(kp)
+	a := procs[501]
+	if a.ppid != 1 || a.pgid != 501 || a.zombie || a.start != 1700000000_000250 {
+		t.Fatalf("501 = %+v", a)
+	}
+	if z := procs[4242]; !z.zombie || z.ppid != 501 {
 		t.Fatalf("4242 = %+v", z)
+	}
+}
+
+func TestSnapshotListsThisProcess(t *testing.T) {
+	procs, err := snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, ok := procs[os.Getpid()]
+	if !ok || self.ppid != os.Getppid() || self.start == 0 {
+		t.Fatalf("own entry = %+v, %v", self, ok)
 	}
 }
