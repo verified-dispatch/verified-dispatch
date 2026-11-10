@@ -8,7 +8,8 @@ import (
 )
 
 // TeardownOptions bound a teardown. Zero values take the defaults the spec
-// names: 15 seconds from SIGTERM to SIGKILL, 60 seconds in all.
+// names: 15 seconds from SIGTERM to SIGKILL, 60 seconds in all. The grace
+// never extends past the bound.
 type TeardownOptions struct {
 	// TermGrace is how long the child has after SIGTERM before SIGKILL.
 	TermGrace time.Duration
@@ -21,6 +22,11 @@ const (
 	defaultBound     = 60 * time.Second
 	// huntInterval is the pause between passes over the descendants.
 	huntInterval = 50 * time.Millisecond
+	// quietPasses is how many consecutive passes must find nothing alive
+	// and reap nothing before the teardown is complete. One quiet pass is
+	// not enough: a process that forks and exits faster than the table is
+	// read shows up as nothing alive on any single pass.
+	quietPasses = 3
 )
 
 func (o TeardownOptions) withDefaults() TeardownOptions {
@@ -35,92 +41,121 @@ func (o TeardownOptions) withDefaults() TeardownOptions {
 
 // TeardownResult says what a teardown did.
 type TeardownResult struct {
-	// Leftovers counts the processes other than the child itself that were
-	// alive when teardown started after the child had exited, or that had
-	// to be killed one by one. Above zero means the child left work
-	// running, which the contract forbids.
+	// Leftovers counts the processes that outlived the child, or that ran
+	// outside its process group and had to be killed one by one. Above
+	// zero means the child left work running, which the contract forbids.
+	// A helper in the child's own group that died with the group is not a
+	// leftover.
 	Leftovers int
-	// Remaining lists the processes still alive when the bound expired.
+	// Remaining lists the processes still found when the bound expired.
 	Remaining []int
-	// Complete is true when nothing remains.
+	// Unsettled is true when processes kept appearing, or the process
+	// table could not be read, until the bound expired. Something of the
+	// child may still run.
+	Unsettled bool
+	// Complete is true when the table was quiet for quietPasses in a row.
 	Complete bool
 	Elapsed  time.Duration
 }
 
-// listFn and killFn are the real listing and kill, replaced in tests that
-// simulate a process that will not die.
-var (
-	listFn = func(p *Process) ([]int, error) { return p.Descendants() }
-	killFn = func(p *Process, pid int, sig syscall.Signal) error { return p.tr.kill(pid, sig) }
-)
+// killFn is the per-process kill, replaced in tests that simulate a
+// process that will not die.
+var killFn = func(p *Process, pid int, sig syscall.Signal) error { return p.tr.kill(pid, sig) }
 
-// Teardown ends the child and everything it left behind, within the bound:
-// SIGTERM to the process group, SIGKILL after the grace, then every
-// descendant still found is killed, pass after pass, until none is found
-// or the bound expires. It is safe to call more than once.
+// Teardown ends the child and everything it left behind, within the bound.
+// SIGTERM goes to the process group, SIGKILL after the grace, then every
+// process still found is killed, pass after pass, until the table has
+// been quiet for several passes or the bound expires. It is safe to call
+// more than once.
 func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 	opts = opts.withDefaults()
 	start := time.Now()
 	deadline := start.Add(opts.Bound)
-	killed := map[int]bool{}
+	leftovers := map[int]bool{}
+	refused := map[int]bool{}
 
-	// Work the child left behind is counted before any signal, while the
-	// group kill has not yet taken it.
-	if p.childDone() {
-		if ds, err := listFn(p); err == nil {
-			for _, pid := range ds {
-				killed[pid] = true
+	// A child that was still running when teardown began ends from the
+	// signals below, and a helper in its group that outlives it for a
+	// moment is its own work, not a leftover.
+	doneAtStart := p.childDone()
+	if doneAtStart {
+		// Anything alive now outlived the child.
+		if alive, _, err := scanFn(p); err == nil {
+			for _, lp := range alive {
+				leftovers[lp.pid] = true
 			}
 		}
 	} else {
 		p.tr.killGroup(syscall.SIGTERM)
-		grace := time.NewTimer(opts.TermGrace)
+		grace := opts.TermGrace
+		if left := time.Until(deadline); left < grace {
+			grace = left
+		}
+		timer := time.NewTimer(grace)
 		select {
 		case <-p.done:
-		case <-grace.C:
+		case <-timer.C:
 		}
-		grace.Stop()
+		timer.Stop()
+		p.tr.killGroup(syscall.SIGKILL)
 	}
-	p.tr.killGroup(syscall.SIGKILL)
 
-	var remaining, refused []int
+	quiet := 0
+	unsettled := false
+	var remaining []int
 	for {
 		remaining = remaining[:0]
-		refused = refused[:0]
-		if !p.Exited() {
+		childDone := p.childDone()
+		if !childDone {
 			remaining = append(remaining, p.pid)
 		}
-		if ds, err := listFn(p); err == nil {
-			for _, pid := range ds {
-				err := killFn(p, pid, syscall.SIGKILL)
-				switch {
-				case err == nil:
-					killed[pid] = true
-					remaining = append(remaining, pid)
-				case errors.Is(err, syscall.ESRCH):
-					// Gone between the listing and the kill.
-				default:
-					remaining = append(remaining, pid)
-					refused = append(refused, pid)
-				}
+		alive, reaped, err := scanFn(p)
+		if err != nil {
+			unsettled = true
+		}
+		for _, lp := range alive {
+			if doneAtStart || lp.pgid != p.pid {
+				leftovers[lp.pid] = true
+			}
+			switch kerr := killFn(p, lp.pid, syscall.SIGKILL); {
+			case kerr == nil:
+				remaining = append(remaining, lp.pid)
+			case errors.Is(kerr, syscall.ESRCH):
+				// Gone, or a different process now, between the listing
+				// and the kill.
+			default:
+				remaining = append(remaining, lp.pid)
+				refused[lp.pid] = true
 			}
 		}
-		if len(remaining) == 0 || time.Now().After(deadline) {
+		if err == nil && len(alive) == 0 && reaped == 0 && childDone {
+			quiet++
+			if quiet >= quietPasses {
+				break
+			}
+		} else {
+			quiet = 0
+			if reaped > 0 {
+				unsettled = true
+			}
+		}
+		if time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(huntInterval)
 	}
 
-	// A leftover counted up front whose kill is still refused at the end
-	// was never killed, so it is reported as remaining, not as killed.
-	for _, pid := range refused {
-		delete(killed, pid)
+	// A process whose kill was refused was never killed; it is remaining,
+	// not a leftover that was dealt with.
+	for pid := range refused {
+		delete(leftovers, pid)
 	}
 	p.Close()
-	res := TeardownResult{Leftovers: len(killed), Elapsed: time.Since(start)}
-	if len(remaining) == 0 {
+	res := TeardownResult{Leftovers: len(leftovers), Elapsed: time.Since(start)}
+	if quiet >= quietPasses {
 		res.Complete = true
 	} else {
+		res.Unsettled = unsettled || len(remaining) == 0
 		res.Remaining = append([]int(nil), remaining...)
 		sort.Ints(res.Remaining)
 	}
