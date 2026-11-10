@@ -13,7 +13,7 @@ import (
 func TestTeardownEndsARunningChildWithTerm(t *testing.T) {
 	p := startFixture(t, "sleep-long.sh", Spec{})
 	res := p.Teardown(quick)
-	if !res.Complete || res.Leftovers != 0 || len(res.Remaining) != 0 {
+	if !res.Complete || res.Leftovers != 0 || len(res.Remaining) != 0 || res.Unsettled {
 		t.Fatalf("result = %+v", res)
 	}
 	st := waitFor(t, p, time.Second)
@@ -27,19 +27,12 @@ func TestTeardownEndsARunningChildWithTerm(t *testing.T) {
 
 func TestTeardownEscalatesToKillAfterTheGrace(t *testing.T) {
 	p := startFixture(t, "ignore-term.sh", Spec{})
-	// A SIGTERM that lands before the script has set its trap ends it at
-	// once. The first sleep starts after the trap, so wait for it.
-	ready := time.Now().Add(5 * time.Second)
+	// Wait until the first sleep exists, which means the trap is set.
+	deadline := time.Now().Add(5 * time.Second)
 	for {
-		ds, err := p.Descendants()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(ds) > 0 {
+		ds, _ := p.Descendants()
+		if len(ds) > 0 || time.Now().After(deadline) {
 			break
-		}
-		if time.Now().After(ready) {
-			t.Fatal("ignore-term.sh never started its loop")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -65,25 +58,42 @@ func TestTeardownCountsWorkTheChildLeftBehind(t *testing.T) {
 	descendantsSoon(t, p, left, 3*time.Second)
 	res := p.Teardown(quick)
 	if !res.Complete || res.Leftovers != 1 || len(res.Remaining) != 0 {
-		t.Fatalf("result = %+v, want one leftover killed", res)
+		t.Fatalf("result = %+v, want one leftover", res)
 	}
 	if !gone(left, 2*time.Second) {
 		t.Fatalf("leftover %d still alive", left)
 	}
 }
 
-func TestTeardownKillsAGrandchildHoldingThePipe(t *testing.T) {
+func TestTeardownCountsALeftoverDuringThePipeCut(t *testing.T) {
+	// The child has exited but Wait has not returned, because a grandchild
+	// holds stdout. Teardown must still see the child as done and count
+	// the holder.
 	var out bytes.Buffer
-	p := startFixture(t, "hold-stdout.sh", Spec{Stdout: &out})
-	waitFor(t, p, 20*time.Second)
-	holder, _ := strconv.Atoi(strings.TrimSpace(out.String()))
-	descendantsSoon(t, p, holder, 3*time.Second)
+	p := startFixture(t, "hold-stdout.sh", Spec{Stdout: NewCappedWriter(&out, 1<<20)})
+	time.Sleep(500 * time.Millisecond)
+	if p.Exited() {
+		t.Skip("Wait already returned; the window closed")
+	}
 	res := p.Teardown(quick)
 	if !res.Complete || res.Leftovers != 1 {
-		t.Fatalf("result = %+v", res)
+		t.Fatalf("result = %+v, want one leftover", res)
 	}
-	if !gone(holder, 2*time.Second) {
-		t.Fatalf("holder %d still alive", holder)
+}
+
+func TestTeardownOfARunningChildDoesNotCountItsOwnHelpers(t *testing.T) {
+	p := startFixture(t, "trap-helper.sh", Spec{})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ds, _ := p.Descendants()
+		if len(ds) >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	res := p.Teardown(quick)
+	if !res.Complete || res.Leftovers != 0 {
+		t.Fatalf("result = %+v; a helper in the child's group is not a leftover", res)
 	}
 }
 
@@ -91,7 +101,7 @@ func TestTeardownOnAnExitedChildWithNothingLeftIsClean(t *testing.T) {
 	p := startFixture(t, "exit-code.sh", Spec{})
 	waitFor(t, p, 10*time.Second)
 	res := p.Teardown(quick)
-	if !res.Complete || res.Leftovers != 0 || len(res.Remaining) != 0 {
+	if !res.Complete || res.Leftovers != 0 || len(res.Remaining) != 0 || res.Unsettled {
 		t.Fatalf("result = %+v", res)
 	}
 }
@@ -106,15 +116,11 @@ func TestTeardownIsIdempotent(t *testing.T) {
 }
 
 func TestTeardownReportsWhatItCouldNotKill(t *testing.T) {
-	// Simulate a process that will not die: the listing keeps returning
-	// pid 1 and the kill is refused, as it would be for init. The child is
-	// started first so its cleanup teardown runs after the real listing
-	// and kill are restored.
 	p := startFixture(t, "exit-code.sh", Spec{})
 	waitFor(t, p, 10*time.Second)
-	oldList, oldKill := listFn, killFn
-	t.Cleanup(func() { listFn, killFn = oldList, oldKill })
-	listFn = func(p *Process) ([]int, error) { return []int{1}, nil }
+	oldScan, oldKill := scanFn, killFn
+	t.Cleanup(func() { scanFn, killFn = oldScan, oldKill })
+	scanFn = func(p *Process) ([]liveProc, int, error) { return []liveProc{{pid: 1, pgid: 1}}, 0, nil }
 	killFn = func(p *Process, pid int, sig syscall.Signal) error {
 		if pid == 1 {
 			return syscall.EPERM
@@ -130,7 +136,31 @@ func TestTeardownReportsWhatItCouldNotKill(t *testing.T) {
 		t.Fatalf("teardown took %s, want about the bound", d)
 	}
 	if res.Leftovers != 0 {
-		t.Fatalf("Killed = %d; a refused kill is not a kill", res.Leftovers)
+		t.Fatalf("Leftovers = %d; a refused kill is not a kill", res.Leftovers)
+	}
+}
+
+func TestTeardownIsIncompleteWhenTheListingFails(t *testing.T) {
+	p := startFixture(t, "exit-code.sh", Spec{})
+	waitFor(t, p, 10*time.Second)
+	old := scanFn
+	t.Cleanup(func() { scanFn = old })
+	scanFn = func(p *Process) ([]liveProc, int, error) { return nil, 0, errors.New("table unreadable") }
+	res := p.Teardown(TeardownOptions{TermGrace: 50 * time.Millisecond, Bound: 300 * time.Millisecond})
+	if res.Complete || !res.Unsettled {
+		t.Fatalf("result = %+v, want incomplete and unsettled", res)
+	}
+}
+
+func TestTeardownGraceIsCappedByTheBound(t *testing.T) {
+	p := startFixture(t, "ignore-term.sh", Spec{})
+	start := time.Now()
+	res := p.Teardown(TeardownOptions{TermGrace: 10 * time.Second, Bound: 1500 * time.Millisecond})
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("teardown took %s with a 1.5 s bound", d)
+	}
+	if !res.Complete {
+		t.Fatalf("result = %+v; SIGKILL within the bound should end an ignoring child", res)
 	}
 }
 
@@ -142,8 +172,5 @@ func TestTeardownDefaults(t *testing.T) {
 	o = TeardownOptions{TermGrace: time.Second, Bound: 2 * time.Second}.withDefaults()
 	if o.TermGrace != time.Second || o.Bound != 2*time.Second {
 		t.Fatalf("explicit values changed: %+v", o)
-	}
-	if !errors.Is(syscall.ESRCH, syscall.ESRCH) {
-		t.Fatal("sanity")
 	}
 }

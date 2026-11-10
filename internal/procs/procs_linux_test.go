@@ -256,3 +256,51 @@ func TestDescendantsIgnoresAReusedChildPid(t *testing.T) {
 		t.Fatalf("Teardown on a reused pid touched the stranger: %+v alive=%v", res, alive(stranger.Pid()))
 	}
 }
+
+func TestTeardownReportsAProcessThatKeepsChangingItsPid(t *testing.T) {
+	dir := t.TempDir()
+	stop := filepath.Join(dir, "stop")
+	pidfile := filepath.Join(dir, "pid")
+	p := startFixture(t, "hopper.sh", Spec{Env: baseEnv("PROCS_HELPER=hopper", "PROCS_STOP="+stop, "PROCS_PIDFILE="+pidfile)})
+	waitFor(t, p, 10*time.Second)
+	// Let it hop for a moment.
+	deadline := time.Now().Add(5 * time.Second)
+	for readCounter(t, pidfile) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	res := p.Teardown(TeardownOptions{TermGrace: 100 * time.Millisecond, Bound: 2 * time.Second})
+	if res.Complete {
+		// A hop that is caught alive is killed and the chain ends. That is
+		// only honest if the hopper really stopped.
+		if !hopperStopped(t, pidfile) {
+			t.Fatalf("result = %+v but the hopper still runs; a pid-changing process must never be declared gone", res)
+		}
+	} else if !res.Unsettled {
+		t.Fatalf("result = %+v; an incomplete teardown of a pid-changing process must be unsettled", res)
+	}
+	// Stop the hopper and let the last hop exit and be reaped.
+	if err := os.WriteFile(stop, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_, _ = p.Descendants() // reaps hops parented here
+		if hopperStopped(t, pidfile) {
+			return
+		}
+	}
+	t.Fatal("hopper did not stop")
+}
+
+// hopperStopped reports whether no hop recorded itself for 300 ms and the
+// last recorded hop is gone. Each hop writes its pid once as it starts; a
+// hop killed during that write leaves the file empty, which reads as 0 and
+// must not be passed to alive, since signal 0 to pid 0 reaches this
+// process's own group.
+func hopperStopped(t *testing.T, pidfile string) bool {
+	t.Helper()
+	last := readCounter(t, pidfile)
+	time.Sleep(300 * time.Millisecond)
+	cur := readCounter(t, pidfile)
+	return cur == last && (cur == 0 || !alive(cur))
+}
