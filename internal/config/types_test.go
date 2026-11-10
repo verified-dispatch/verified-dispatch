@@ -57,9 +57,29 @@ func TestHashIsStableAndSensitive(t *testing.T) {
 	if a.Hash() != b.Hash() {
 		t.Fatal("two equal values hashed differently")
 	}
-	b.Gate.Protected = []string{"Makefile"}
-	if a.Hash() == b.Hash() {
-		t.Fatal("a protected path change did not change the hash")
+	changes := map[string]func(r *Resolved){
+		"protected": func(r *Resolved) { r.Gate.Protected = []string{"Makefile"} },
+		"command":   func(r *Resolved) { r.Gate.Command = "make test" },
+		"isolated":  func(r *Resolved) { r.Gate.Isolated = false },
+		"preset":    func(r *Resolved) { r.Builder.Preset = "codex" },
+		"argv":      func(r *Resolved) { r.Builder.Command = []string{"codex"} },
+		"limit":     func(r *Resolved) { r.Limits.WallClockMinutes = 10 },
+		"condense":  func(r *Resolved) { r.Condense = []string{"^ok"} },
+		"redaction": func(r *Resolved) { r.Redaction = []string{"x"} },
+		"style":     func(r *Resolved) { r.Contract.CommitStyle = "any" },
+		"additions": func(r *Resolved) { r.Contract.Additions = "docs/x.md" },
+		"retention": func(r *Resolved) { r.RetentionDays = 1 },
+		"cap":       func(r *Resolved) { r.Caps.GateMinutes = 1 },
+		"source":    func(r *Resolved) { r.Sources.Gate = SourceRepo },
+		"repo hash": func(r *Resolved) { r.RepoLayerHash = "abc" },
+		"key file":  func(r *Resolved) { r.DigestKeyFile = "/k" },
+	}
+	for name, change := range changes {
+		c := defaults()
+		change(&c)
+		if c.Hash() == a.Hash() {
+			t.Errorf("changing %s did not change the hash", name)
+		}
 	}
 }
 

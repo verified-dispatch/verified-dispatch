@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -219,5 +220,89 @@ func TestLoadDedupesMergedLists(t *testing.T) {
 	})
 	if got := strings.Join(r.Gate.Protected, ","); got != "a,b,c" {
 		t.Fatalf("protected = %q, want a,b,c", got)
+	}
+}
+
+func TestLoadRefusesControlCharactersInCommands(t *testing.T) {
+	wantRefusal(t, Inputs{Repo: []byte("[gate]\ncommand = \"make test\\u001b[2K\\rmake evil\"\n")}, "repository config sets gate.command with a control character")
+	wantRefusal(t, Inputs{Repo: []byte("[gate]\ncommand = \"x\"\nprepare = \"a\\nb\"\n")}, "gate.prepare with a control character")
+	wantRefusal(t, Inputs{Home: []byte("[gate]\ncommand = \"a\\u0085b\"\n")}, "home config sets gate.command with a control character")
+	wantRefusal(t, Inputs{Flags: Flags{Gate: "a\x7fb"}}, "--gate sets gate.command with a control character")
+	// A tab is ordinary whitespace in a shell command.
+	r := mustLoad(t, Inputs{Repo: []byte("[gate]\ncommand = \"make\\ttest\"\n")})
+	if r.Gate.Command != "make\ttest" {
+		t.Fatalf("command = %q", r.Gate.Command)
+	}
+}
+
+func TestLoadRefusesBadPathsPerLayer(t *testing.T) {
+	repo := func(body string) Inputs { return Inputs{Repo: []byte("[gate]\ncommand = \"x\"\n" + body)} }
+	wantRefusal(t, repo("protected = [\"../etc/passwd\"]\n"), "repository config sets gate.protected entry \"../etc/passwd\", which is not a local relative path")
+	wantRefusal(t, repo("prepare_inputs = [\"/abs\"]\n"), "repository config sets gate.prepare_inputs entry")
+	wantRefusal(t, repo("protected = [\".git/config\"]\n"), "names a .git component")
+	wantRefusal(t, repo("protected = [\"sub/.GIT/hooks\"]\n"), "names a .git component")
+	wantRefusal(t, repo("protected = [\"a//b\"]\n"), "is not in clean form")
+	wantRefusal(t, repo("protected = [\"./a\"]\n"), "is not in clean form")
+	wantRefusal(t, repo("protected = [\"a/\"]\n"), "is not in clean form")
+	wantRefusal(t, repo("protected = [\"a\\u0000b\"]\n"), "control character")
+	wantRefusal(t, repo("protected = [\"a\\u001bb\"]\n"), "control character")
+	wantRefusal(t, repo("protected = [\"\"]\n"), "empty entry")
+	wantRefusal(t, repo("protected = [\""+strings.Repeat("a", MaxPathBytes+1)+"\"]\n"), "above the limit")
+	many := "protected = [" + strings.TrimSuffix(strings.Repeat("\"p\",", MaxPathEntries+1), ",") + "]\n"
+	wantRefusal(t, repo(many), "gate.protected with "+fmt.Sprint(MaxPathEntries+1)+" entries")
+	wantRefusal(t, repo("[contract]\nadditions = \".\"\n"), "contract.additions")
+	wantRefusal(t, repo("[contract]\nadditions = \".vdispatch.toml\"\n"), "may not name a .vdispatch file")
+	wantRefusal(t, repo("[contract]\nadditions = \"docs/.vdispatch-rules.md\"\n"), "may not name a .vdispatch file")
+	wantRefusal(t, repo("prepare_inputs = [\".vdispatch.toml\"]\n"), "may not name a .vdispatch file")
+	wantRefusal(t, Inputs{Home: []byte("[gate]\ncommand = \"x\"\nprotected = [\"../x\"]\n")}, "home config sets gate.protected entry")
+	// gate.protected may name the repository config; that is useful.
+	r := mustLoad(t, repo("protected = [\".vdispatch.toml\", \"Makefile\", \"docs/.gitkeep\"]\n"))
+	if len(r.Gate.Protected) != 3 {
+		t.Fatalf("protected = %q", r.Gate.Protected)
+	}
+}
+
+func TestLoadRefusesBadCommitStylePerLayer(t *testing.T) {
+	wantRefusal(t, Inputs{Repo: []byte("[gate]\ncommand = \"x\"\n[contract]\ncommit_style = \"loose\"\n")}, "repository config sets contract.commit_style")
+	wantRefusal(t, Inputs{Home: []byte("[contract]\ncommit_style = \"loose\"\n"), Flags: Flags{Gate: "x"}}, "home config sets contract.commit_style")
+}
+
+func TestLoadHashIsTheSameWithNoHomeFileAndAnEmptyOne(t *testing.T) {
+	a := mustLoad(t, Inputs{Flags: Flags{Gate: "x"}})
+	b := mustLoad(t, Inputs{Home: []byte(""), Flags: Flags{Gate: "x"}})
+	if a.Hash() != b.Hash() {
+		t.Fatal("an empty home file changed the hash of an otherwise equal configuration")
+	}
+	for name, l := range map[string][]string{"prepare_inputs": a.Gate.PrepareInputs, "protected": a.Gate.Protected, "condense": a.Condense, "redaction": a.Redaction} {
+		if l == nil {
+			t.Errorf("%s is nil; lists must be empty slices so the hash is stable", name)
+		}
+	}
+}
+
+func TestLoadRepoLayerHashCoversEveryRepositoryKey(t *testing.T) {
+	base := mustLoad(t, Inputs{Repo: []byte(repoOK), Home: []byte(homeOK)}).RepoLayerHash
+	variants := map[string]string{
+		"isolated":  strings.Replace(repoOK, "minutes = 15", "minutes = 15\nisolated = false", 1),
+		"limits":    strings.Replace(repoOK, "commit_stall_minutes = 10", "commit_stall_minutes = 11", 1),
+		"additions": strings.Replace(repoOK, "docs/rules.md", "docs/other.md", 1),
+		"patterns":  strings.Replace(repoOK, `"^passed"`, `"^PASS"`, 1),
+		"preset":    strings.Replace(repoOK, `preset = "open"`, `preset = "claude-code"`, 1),
+		"command":   strings.Replace(repoOK, "pytest -q", "pytest", 1),
+		"inputs":    strings.Replace(repoOK, `"uv.lock"`, `"poetry.lock"`, 1),
+	}
+	for name, src := range variants {
+		if src == repoOK {
+			t.Fatalf("variant %s did not change the fixture", name)
+		}
+		got := mustLoad(t, Inputs{Repo: []byte(src), Home: []byte(homeOK)}).RepoLayerHash
+		if got == base {
+			t.Errorf("changing %s did not change RepoLayerHash", name)
+		}
+	}
+	// Comments and table form do not change the decoded layer.
+	same := mustLoad(t, Inputs{Repo: []byte("# a comment\n" + repoOK), Home: []byte(homeOK)}).RepoLayerHash
+	if same != base {
+		t.Fatal("a comment changed RepoLayerHash")
 	}
 }

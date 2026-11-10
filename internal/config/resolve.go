@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -122,7 +123,9 @@ func layerName(src Source) string {
 	}
 }
 
-// apply copies one decoded layer onto r, checking caps as values arrive.
+// apply copies one decoded layer onto r. Every rule about a single value is
+// checked here, against the layer that set it, so a refusal names the
+// layer. Rules that span layers live in validate.
 func apply(r *Resolved, l *layer, src Source) error {
 	who := layerName(src)
 	if l.Gate.Command != nil {
@@ -139,6 +142,9 @@ func apply(r *Resolved, l *layer, src Source) error {
 		r.Gate.Prepare = *l.Gate.Prepare
 		r.Sources.Prepare = src
 	}
+	if err := checkPathList(who, "gate.prepare_inputs", l.Gate.PrepareInputs, pathInput); err != nil {
+		return err
+	}
 	r.Gate.PrepareInputs = mergeList(r.Gate.PrepareInputs, l.Gate.PrepareInputs)
 	if l.Gate.Minutes != nil {
 		if err := checkRange(who, "gate.minutes", int64(*l.Gate.Minutes), int64(r.Caps.GateMinutes)); err != nil {
@@ -154,6 +160,9 @@ func apply(r *Resolved, l *layer, src Source) error {
 	}
 	if l.Gate.Isolated != nil {
 		r.Gate.Isolated = *l.Gate.Isolated
+	}
+	if err := checkPathList(who, "gate.protected", l.Gate.Protected, pathProtected); err != nil {
+		return err
 	}
 	r.Gate.Protected = mergeList(r.Gate.Protected, l.Gate.Protected)
 
@@ -197,13 +206,14 @@ func apply(r *Resolved, l *layer, src Source) error {
 	r.Redaction = mergeList(r.Redaction, l.Redaction.Patterns)
 
 	if l.Contract.CommitStyle != nil {
+		if s := *l.Contract.CommitStyle; s != "conventional" && s != "any" {
+			return refusef("%s sets contract.commit_style = %q; it must be \"conventional\" or \"any\"", who, s)
+		}
 		r.Contract.CommitStyle = *l.Contract.CommitStyle
 	}
 	if l.Contract.Additions != nil {
-		// An empty value is not local, so a layer that sets it empty is
-		// refused here; validate cannot tell empty from unset.
-		if !filepath.IsLocal(*l.Contract.Additions) {
-			return refusef("%s sets contract.additions %q, which is not a local relative path", who, *l.Contract.Additions)
+		if err := checkPath(who, "contract.additions", *l.Contract.Additions, pathInput); err != nil {
+			return err
 		}
 		r.Contract.Additions = *l.Contract.Additions
 	}
@@ -288,13 +298,94 @@ func checkRange(who, key string, value, cap int64) error {
 	return nil
 }
 
-// checkCommand refuses an empty or oversized shell command.
+// checkCommand refuses an empty or oversized shell command, and one that
+// holds a control character other than tab. A control character in a
+// command can rewrite the line that shows the user what will run.
 func checkCommand(who, key, v string) error {
 	if strings.TrimSpace(v) == "" {
 		return refusef("%s sets %s to an empty command", who, key)
 	}
 	if len(v) > MaxCommandBytes {
 		return refusef("%s sets %s to %d bytes, above the limit %d", who, key, len(v), MaxCommandBytes)
+	}
+	if hasControl(v, '\t') {
+		return refusef("%s sets %s with a control character; only printable characters and tab are allowed", who, key)
+	}
+	return nil
+}
+
+// hasControl reports whether s holds a C0 or C1 control character or
+// DEL, other than the allowed runes.
+func hasControl(s string, allowed ...rune) bool {
+	for _, r := range s {
+		if r >= 0x20 && r != 0x7f && (r < 0x80 || r > 0x9f) {
+			continue
+		}
+		if slices.Contains(allowed, r) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// pathKind says which extra rules a path list follows.
+type pathKind int
+
+const (
+	// pathProtected is a path the gate must not change. It may name the
+	// repository config.
+	pathProtected pathKind = iota
+	// pathInput is a file the tool reads or hands to the builder. It may
+	// not be the top level or any .vdispatch file.
+	pathInput
+)
+
+// checkPathList bounds one layer's own list before merging and checks
+// every entry.
+func checkPathList(who, key string, paths []string, kind pathKind) error {
+	if n := len(paths); n > MaxPathEntries {
+		return refusef("%s sets %s with %d entries, above the limit %d", who, key, n, MaxPathEntries)
+	}
+	for _, p := range paths {
+		if err := checkPath(who, key, p, kind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkPath refuses a path that is empty, oversized, holds a control
+// character, leaves the working tree, is not in clean form, or names a
+// .git component. Clean form means filepath.Clean leaves it unchanged, so
+// a string match against a path git reports cannot miss. The .git check
+// ignores case because some file systems do.
+func checkPath(who, key, p string, kind pathKind) error {
+	if p == "" {
+		return refusef("%s sets %s with an empty entry", who, key)
+	}
+	if len(p) > MaxPathBytes {
+		return refusef("%s sets %s with an entry of %d bytes, above the limit %d", who, key, len(p), MaxPathBytes)
+	}
+	if hasControl(p) {
+		return refusef("%s sets %s with an entry that holds a control character", who, key)
+	}
+	if !filepath.IsLocal(p) {
+		return refusef("%s sets %s entry %q, which is not a local relative path", who, key, p)
+	}
+	if filepath.Clean(p) != p {
+		return refusef("%s sets %s entry %q, which is not in clean form (write it as %q)", who, key, p, filepath.Clean(p))
+	}
+	for _, part := range strings.Split(p, "/") {
+		if strings.EqualFold(part, ".git") {
+			return refusef("%s sets %s entry %q, which names a .git component", who, key, p)
+		}
+		if kind == pathInput && strings.HasPrefix(part, ".vdispatch") {
+			return refusef("%s sets %s entry %q, which may not name a .vdispatch file", who, key, p)
+		}
+	}
+	if kind == pathInput && p == "." {
+		return refusef("%s sets %s to %q, which is the top level, not a file", who, key, p)
 	}
 	return nil
 }
@@ -319,27 +410,21 @@ func mergeList(base, add []string) []string {
 	return out
 }
 
-// validate checks the merged value: a gate exists, paths are local, the
-// commit style is known, and the pattern lists are bounded and compile.
+// validate checks what only the merged value can tell: a gate exists, the
+// merged lists stay within bounds, and the patterns fit the run budget.
 func validate(r *Resolved) error {
 	if r.Gate.Command == "" {
 		return refusef("no gate command is configured; set gate.command in %s or pass --gate", RepoFile)
 	}
-	if r.Contract.CommitStyle != "conventional" && r.Contract.CommitStyle != "any" {
-		return refusef("contract.commit_style must be \"conventional\" or \"any\", got %q", r.Contract.CommitStyle)
-	}
-	for _, p := range r.Gate.PrepareInputs {
-		if !filepath.IsLocal(p) {
-			return refusef("gate.prepare_inputs entry %q is not a local relative path", p)
+	for key, l := range map[string][]string{"gate.prepare_inputs": r.Gate.PrepareInputs, "gate.protected": r.Gate.Protected} {
+		if len(l) > MaxPathEntries {
+			return refusef("%s has %d entries after merging the layers, above the limit %d", key, len(l), MaxPathEntries)
 		}
 	}
-	for _, p := range r.Gate.Protected {
-		if !filepath.IsLocal(p) {
-			return refusef("gate.protected entry %q is not a local relative path", p)
+	for key, l := range map[string][]string{"condense.patterns": r.Condense, "redaction.patterns": r.Redaction} {
+		if len(l) > MaxPatterns {
+			return refusef("%s has %d entries after merging the layers, above the limit %d", key, len(l), MaxPatterns)
 		}
-	}
-	if r.Contract.Additions != "" && !filepath.IsLocal(r.Contract.Additions) {
-		return refusef("contract.additions %q is not a local relative path", r.Contract.Additions)
 	}
 	return checkPatternBudget(r.Condense, r.Redaction)
 }
