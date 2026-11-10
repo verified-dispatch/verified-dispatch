@@ -102,3 +102,26 @@ func TestReadRepoBlobRefusesOversizedBlob(t *testing.T) {
 		t.Fatalf("oversized: err = %v, want a plain error about the size", err)
 	}
 }
+
+func TestReadRepoBlobReadsTheTopLevelFromASubdirectory(t *testing.T) {
+	dir, r := repoWithHead(t)
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, RepoFile), []byte("[gate]\ncommand = \"top\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", RepoFile), []byte("[gate]\ncommand = \"sub\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostGit(t, dir, "add", "-A")
+	hostGit(t, dir, "commit", "-q", "-m", "two configs")
+	r.Dir = filepath.Join(dir, "sub")
+	data, present, err := ReadRepoBlob(context.Background(), r)
+	if err != nil || !present {
+		t.Fatalf("present: %v, %v", present, err)
+	}
+	if string(data) != "[gate]\ncommand = \"top\"\n" {
+		t.Fatalf("data = %q, want the top-level config", data)
+	}
+}

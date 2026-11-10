@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,8 +19,6 @@ func TestHomePath(t *testing.T) {
 	}{
 		{"linux", map[string]string{"HOME": "/home/u"}, "/home/u/.config/vdispatch/config.toml", false},
 		{"linux", map[string]string{"HOME": "/home/u", "XDG_CONFIG_HOME": "/xdg"}, "/xdg/vdispatch/config.toml", false},
-		// A relative XDG_CONFIG_HOME is invalid and ignored.
-		{"linux", map[string]string{"HOME": "/home/u", "XDG_CONFIG_HOME": "rel"}, "/home/u/.config/vdispatch/config.toml", false},
 		{"darwin", map[string]string{"HOME": "/Users/u", "XDG_CONFIG_HOME": "/xdg"}, "/Users/u/Library/Application Support/vdispatch/config.toml", false},
 		{"linux", map[string]string{}, "", true},
 		{"darwin", map[string]string{}, "", true},
@@ -34,6 +33,17 @@ func TestHomePath(t *testing.T) {
 			t.Errorf("%s %v: path = %q, want %q", c.goos, c.env, got, c.want)
 		}
 	}
+	// HOME and XDG_CONFIG_HOME must be absolute, or the home config could
+	// land inside the working tree.
+	if _, err := HomePath("linux", env(map[string]string{"HOME": "relative"})); err == nil {
+		t.Fatal("relative HOME accepted")
+	}
+	if _, err := HomePath("linux", env(map[string]string{"HOME": "/home/u", "XDG_CONFIG_HOME": "relative"})); err == nil {
+		t.Fatal("relative XDG_CONFIG_HOME accepted")
+	}
+	if _, err := HomePath("darwin", env(map[string]string{"HOME": "relative"})); err == nil {
+		t.Fatal("relative HOME accepted on darwin")
+	}
 }
 
 func TestReadHome(t *testing.T) {
@@ -47,6 +57,22 @@ func TestReadHome(t *testing.T) {
 	}
 	if b, err := ReadHome(path); err != nil || string(b) != "[gate]\n" {
 		t.Fatalf("present file: %q, %v", b, err)
+	}
+	for _, mode := range []os.FileMode{0o622, 0o660, 0o666, 0o602} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadHome(path); err == nil || !strings.Contains(err.Error(), "writable") {
+			t.Fatalf("mode %o: err = %v, want an error about other writers", mode, err)
+		}
+	}
+	for _, mode := range []os.FileMode{0o600, 0o644, 0o640} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadHome(path); err != nil {
+			t.Fatalf("mode %o: err = %v, want nil", mode, err)
+		}
 	}
 	if err := os.WriteFile(path, make([]byte, ConfigFileBytes+1), 0o600); err != nil {
 		t.Fatal(err)
