@@ -46,7 +46,10 @@ func TestPresetValidation(t *testing.T) {
 }
 
 func TestResolvePresetTrustRules(t *testing.T) {
-	embedded := map[string]Preset{"claude-code": {Command: []string{"claude"}, Prompt: PromptStdin, RepoSelectable: true}}
+	embedded := map[string]Preset{
+		"claude-code": {Command: []string{"claude"}, Prompt: PromptStdin, RepoSelectable: true},
+		"private":     {Command: []string{"private"}, Prompt: PromptStdin},
+	}
 	home := map[string]Preset{
 		"open":   {Command: []string{"open"}, Prompt: PromptStdin, RepoSelectable: true},
 		"closed": {Command: []string{"closed"}, Prompt: PromptStdin},
@@ -72,6 +75,12 @@ func TestResolvePresetTrustRules(t *testing.T) {
 	}
 	if _, err := resolvePreset("closed", SourceFlag, embedded, home); err != nil {
 		t.Fatalf("a flag may name a closed preset: %v", err)
+	}
+	if _, err := resolvePreset("private", SourceRepo, embedded, home); !isRefusal(err) || !strings.Contains(err.Error(), "repo_selectable") {
+		t.Fatalf("embedded preset without repo_selectable from repo: err = %v, want a refusal", err)
+	}
+	if _, err := resolvePreset("private", SourceHome, embedded, home); err != nil {
+		t.Fatalf("home may name an embedded preset without repo_selectable: %v", err)
 	}
 	if _, err := resolvePreset("nope", SourceRepo, embedded, home); !isRefusal(err) {
 		t.Fatalf("unknown preset from repo: err = %v, want *Refusal", err)
