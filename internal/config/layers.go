@@ -71,9 +71,13 @@ type digestLayer struct {
 	KeyFile *string `toml:"key_file" json:"key_file"`
 }
 
-// decodeLayer parses one configuration file. name labels errors.
+// decodeLayer parses one configuration file. name labels errors. The
+// structure check runs first so a hostile shape never reaches the decoder.
 func decodeLayer(data []byte, name string) (*layer, toml.MetaData, error) {
 	var l layer
+	if err := checkStructure(data); err != nil {
+		return nil, toml.MetaData{}, fmt.Errorf("%s %w", name, err)
+	}
 	md, err := toml.Decode(string(data), &l)
 	if err != nil {
 		return nil, md, fmt.Errorf("%s: %w", name, err)
