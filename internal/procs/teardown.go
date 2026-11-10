@@ -9,7 +9,7 @@ import (
 
 // TeardownOptions bound a teardown. Zero values take the defaults the spec
 // names: 15 seconds from SIGTERM to SIGKILL, 60 seconds in all. The grace
-// never extends past the bound.
+// never extends past the bound, and leaves room before it for the hunt.
 type TeardownOptions struct {
 	// TermGrace is how long the child has after SIGTERM before SIGKILL.
 	TermGrace time.Duration
@@ -27,6 +27,11 @@ const (
 	// not enough: a process that forks and exits faster than the table is
 	// read shows up as nothing alive on any single pass.
 	quietPasses = 3
+	// huntReserve is the part of the bound the grace never takes, so the
+	// SIGKILL and the quiet passes after it still fit. Without it a grace
+	// as long as the bound sends SIGKILL at the deadline and the hunt gets
+	// a single pass.
+	huntReserve = 10 * huntInterval
 )
 
 func (o TeardownOptions) withDefaults() TeardownOptions {
@@ -88,8 +93,8 @@ func (p *Process) Teardown(opts TeardownOptions) TeardownResult {
 	} else {
 		p.tr.killGroup(syscall.SIGTERM)
 		grace := opts.TermGrace
-		if left := time.Until(deadline); left < grace {
-			grace = left
+		if left := time.Until(deadline) - huntReserve; left < grace {
+			grace = max(left, 0)
 		}
 		timer := time.NewTimer(grace)
 		select {

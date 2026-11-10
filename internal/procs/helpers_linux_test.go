@@ -18,7 +18,10 @@ func init() {
 		counter := os.Getenv("PROCS_COUNTER")
 		go func() {
 			for i := 1; ; i++ {
-				_ = os.WriteFile(counter, []byte(strconv.Itoa(i)), 0o600)
+				// Write then rename, so a kill during the write never
+				// leaves an empty counter that reads as zero.
+				_ = os.WriteFile(counter+".tmp", []byte(strconv.Itoa(i)), 0o600)
+				_ = os.Rename(counter+".tmp", counter)
 				time.Sleep(20 * time.Millisecond)
 			}
 		}()

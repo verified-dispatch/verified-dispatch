@@ -216,13 +216,15 @@ func startObserver(p *Process) *observer {
 		defer close(o.stopped)
 		t := time.NewTicker(pollInterval)
 		defer t.Stop()
-		_, _, _ = scanFn(p)
+		// The observer calls the platform scan itself, not scanFn, so a
+		// test that replaces scanFn never races with it.
+		_, _, _ = p.tr.scan(p)
 		for {
 			select {
 			case <-o.stop:
 				return
 			case <-t.C:
-				_, _, _ = scanFn(p)
+				_, _, _ = p.tr.scan(p)
 			}
 		}
 	}()
