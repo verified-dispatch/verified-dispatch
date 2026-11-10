@@ -122,9 +122,13 @@ func (t *tracker) childAlive() bool {
 
 // scan builds the child's tree from one ps snapshot: the child while it is
 // the same process, every tracked process still the same process, every
-// process in the child's group or session while the child is alive, then
-// everything below them by parent chain. macOS reaps orphans itself, so
-// nothing is reaped here.
+// process in the child's group while the pid is not held by a different
+// process, every process in the child's session while the child is alive,
+// then everything below them by parent chain. The group rule must outlive
+// the child because nothing reparents an orphan to the tool on macOS, and
+// it is safe because the kernel does not reuse a pid while a process group
+// with that id exists. macOS reaps orphans itself, so nothing is reaped
+// here.
 func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
 	procs, err := psSnapshot()
 	if err != nil {
@@ -149,8 +153,14 @@ func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
 		}
 	}
 	child, childOK := procs[p.pid]
-	childAlive := childOK && t.known && child.start == t.start && !child.zombie
-	if childOK && t.known && child.start == t.start {
+	sameChild := childOK && t.known && child.start == t.start
+	childAlive := sameChild && !child.zombie
+	// The group id outlives the child: the kernel does not reuse a pid
+	// while a process group with that id exists. So members of the
+	// child's group are its own as long as the pid is not held by a
+	// different process. The session rule is kept to a live child.
+	groupRule := sameChild || !childOK
+	if sameChild {
 		seed(p.pid)
 	}
 	for pid, start := range t.tracked {
@@ -160,12 +170,12 @@ func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
 			delete(t.tracked, pid)
 		}
 	}
-	if childAlive {
-		for pid, pi := range procs {
-			if pi.pgid == p.pid {
-				seed(pid)
-				continue
-			}
+	for pid, pi := range procs {
+		if groupRule && pi.pgid == p.pid {
+			seed(pid)
+			continue
+		}
+		if childAlive {
 			if sid, err := syscall.Getsid(pid); err == nil && sid == p.pid {
 				seed(pid)
 			}

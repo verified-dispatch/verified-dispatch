@@ -38,14 +38,21 @@ func setCloexec(fd int) error {
 
 // markFrom marks every descriptor listed in dir (one entry per open
 // descriptor) from 3 upward. Entries that are not numbers, or that vanish
-// between listing and marking, are skipped.
+// between listing and marking, are skipped. The names are read without
+// stat: on macOS the entry for the directory's own descriptor cannot be
+// stat'ed, and os.ReadDir fails on it with a bad file descriptor error.
 func markFrom(dir string) error {
-	entries, err := os.ReadDir(dir)
+	f, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("procs: list descriptors: %w", err)
 	}
-	for _, e := range entries {
-		fd, err := strconv.Atoi(e.Name())
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return fmt.Errorf("procs: list descriptors: %w", err)
+	}
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		if err != nil || fd < 3 {
 			continue
 		}
