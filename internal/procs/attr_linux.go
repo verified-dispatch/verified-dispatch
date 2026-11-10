@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // sysProcAttr puts the child in a new session and process group and has
@@ -20,28 +22,15 @@ func sysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 }
 
-// prctl options this package uses, from <linux/prctl.h>.
-const (
-	prGetDumpable       = 3
-	prSetDumpable       = 4
-	prSetChildSubreaper = 36
-)
-
-func prctl(option, arg uintptr) (uintptr, error) {
-	r, _, e := syscall.Syscall(syscall.SYS_PRCTL, option, arg, 0)
-	if e != 0 {
-		return 0, fmt.Errorf("procs: prctl(%d): %w", option, e)
-	}
-	return r, nil
-}
-
 // EnableSubreaper makes this process the parent of every descendant that
 // is orphaned below it, so a process the child left behind is visible as
 // a direct child here instead of vanishing under init. Start calls it;
 // callers may call it earlier.
 func EnableSubreaper() error {
-	_, err := prctl(prSetChildSubreaper, 1)
-	return err
+	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		return fmt.Errorf("procs: become subreaper: %w", err)
+	}
+	return nil
 }
 
 var subreaperOnce sync.Once
@@ -59,8 +48,8 @@ func ensureSubreaper() error {
 // a capable debugger attach regardless is outside this guard; the docs
 // say so.
 func DisableAttach() error {
-	if _, err := prctl(prSetDumpable, 0); err != nil {
-		return err
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("procs: refuse attachment: %w", err)
 	}
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		return fmt.Errorf("procs: disable core dumps: %w", err)
@@ -81,8 +70,7 @@ func DisableAttach() error {
 
 // dumpable reads the flag DisableAttach clears. Tests use it.
 func dumpable() (int, error) {
-	r, err := prctl(prGetDumpable, 0)
-	return int(r), err
+	return unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
 }
 
 // Containment is the receipt line that says how children are contained on
