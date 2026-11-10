@@ -265,13 +265,16 @@ func TestContainmentNamesThePlatformMechanism(t *testing.T) {
 	if !strings.HasPrefix(c, "containment: ") {
 		t.Fatalf("Containment() = %q", c)
 	}
+	if !strings.Contains(c, "not covered:") {
+		t.Fatalf("Containment() = %q, want it to name the gaps", c)
+	}
 	switch runtime.GOOS {
 	case "linux":
 		if !strings.Contains(c, "subreaper") || !strings.Contains(c, "parent-death") {
 			t.Fatalf("Containment() = %q", c)
 		}
 	case "darwin":
-		if !strings.Contains(c, "observed descendants") || !strings.Contains(c, "1 s poll") {
+		if !strings.Contains(c, "observed every second") || !strings.Contains(c, "1 s poll") {
 			t.Fatalf("Containment() = %q", c)
 		}
 	}
