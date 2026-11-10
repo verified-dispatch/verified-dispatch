@@ -4,6 +4,7 @@ package procs
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -303,4 +304,26 @@ func hopperStopped(t *testing.T, pidfile string) bool {
 	time.Sleep(300 * time.Millisecond)
 	cur := readCounter(t, pidfile)
 	return cur == last && (cur == 0 || !alive(cur))
+}
+
+func TestKillThroughPidfdRefusesAMismatchedStartTime(t *testing.T) {
+	p := startFixture(t, "sleep-long.sh", Spec{})
+	p.tr.mu.Lock()
+	p.tr.tracked[p.Pid()] = statOf(t, p.Pid()).start + 1 // not this process
+	p.tr.mu.Unlock()
+	if err := p.tr.kill(p.Pid(), syscall.SIGKILL); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("kill with a mismatched start = %v, want ESRCH", err)
+	}
+	if !alive(p.Pid()) {
+		t.Fatal("the child was signalled despite the mismatch")
+	}
+	p.tr.mu.Lock()
+	p.tr.tracked[p.Pid()] = statOf(t, p.Pid()).start
+	p.tr.mu.Unlock()
+	if err := p.tr.kill(p.Pid(), syscall.SIGKILL); err != nil {
+		t.Fatalf("kill = %v", err)
+	}
+	if st := waitFor(t, p, 5*time.Second); !st.Signaled || st.Signal != syscall.SIGKILL {
+		t.Fatalf("status = %s", st)
+	}
 }
