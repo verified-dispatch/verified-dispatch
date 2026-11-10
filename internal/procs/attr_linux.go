@@ -5,6 +5,8 @@ package procs
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -95,4 +97,82 @@ func dumpable() (int, error) {
 // this platform.
 func Containment() string {
 	return "containment: session and process group, child subreaper, parent-death signal"
+}
+
+// snapshot reads every process in /proc. A process that exits between the
+// directory listing and the read is skipped.
+func snapshot() (map[int]procInfo, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, fmt.Errorf("procs: /proc: %w", err)
+	}
+	out := make(map[int]procInfo, len(entries))
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		if info, ok := parseStat(pid, b); ok {
+			out[pid] = info
+		}
+	}
+	return out, nil
+}
+
+// Descendants lists every live process that belongs to the child: those in
+// its session or process group, those whose parent chain reaches it, and
+// those reparented to this process from another session, which is how an
+// orphan that called setsid appears to a subreaper. The child itself is
+// not listed. A zombie in the set that this process now parents is reaped
+// and skipped.
+func (p *Process) Descendants() ([]int, error) {
+	procs, err := snapshot()
+	if err != nil {
+		return nil, err
+	}
+	selfSid := -1
+	if self, ok := procs[p.selfPid]; ok {
+		selfSid = self.sid
+	}
+	in := map[int]bool{p.pid: true}
+	for changed := true; changed; {
+		changed = false
+		for pid, pi := range procs {
+			if in[pid] || pid == p.selfPid {
+				continue
+			}
+			if pi.sid == p.pid || pi.pgid == p.pid || in[pi.ppid] || (pi.ppid == p.selfPid && pi.sid != selfSid) {
+				in[pid] = true
+				changed = true
+			}
+		}
+	}
+	var out []int
+	for pid := range in {
+		if pid == p.pid {
+			continue
+		}
+		pi := procs[pid]
+		if pi.zombie {
+			if pi.ppid == p.selfPid {
+				reap(pid)
+			}
+			continue
+		}
+		out = append(out, pid)
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
+// reap collects the exit status of a zombie this process parents but did
+// not start, so it leaves the process table. Children started through
+// exec.Cmd are never passed here; they are collected by their own Wait.
+func reap(pid int) {
+	var ws syscall.WaitStatus
+	_, _ = syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
 }
