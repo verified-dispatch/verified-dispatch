@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -45,7 +46,7 @@ func isZombie(pid int) bool {
 		return false
 	}
 	info, ok := parseStat(pid, b)
-	return ok && info.zombie
+	return ok && info.exited()
 }
 
 // checkAttachDisabled reads the dumpable flag back; 0 means a same-user
@@ -103,7 +104,7 @@ func TestDescendantsFindsAProcessThatChangedSession(t *testing.T) {
 		t.Skip("no setsid binary")
 	}
 	var out bytes.Buffer
-	p := startFixture(t, "escape-setsid.sh", Spec{Stdout: &out})
+	p := startFixture(t, "new-session-background.sh", Spec{Stdout: &out})
 	waitFor(t, p, 10*time.Second)
 	escaped, err := strconv.Atoi(strings.TrimSpace(out.String()))
 	if err != nil {
@@ -134,13 +135,13 @@ func TestDescendantsFindsAProcessThatChangedSession(t *testing.T) {
 }
 
 func TestParseStatHandlesSpacesAndParenthesesInTheName(t *testing.T) {
-	line := []byte("123 (my prog) (x) S 45 67 89 0 -1 4194560 0 0 0 0\n")
+	line := []byte("123 (my prog) (x) S 45 67 89 0 -1 4194560 0 0 0 0 1 2 3 4 20 0 1 0 777 100\n")
 	info, ok := parseStat(123, line)
-	if !ok || info.pid != 123 || info.ppid != 45 || info.pgid != 67 || info.sid != 89 || info.zombie {
+	if !ok || info.pid != 123 || info.ppid != 45 || info.pgid != 67 || info.sid != 89 || info.exited() {
 		t.Fatalf("parseStat = %+v, %v", info, ok)
 	}
-	z, ok := parseStat(5, []byte("5 (z) Z 1 1 1\n"))
-	if !ok || !z.zombie {
+	z, ok := parseStat(5, []byte("5 (z) Z 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 50\n"))
+	if !ok || !z.exited() {
 		t.Fatalf("zombie: %+v, %v", z, ok)
 	}
 	if _, ok := parseStat(5, []byte("garbage")); ok {
@@ -170,5 +171,88 @@ func TestDescendantsReapsAZombieTheToolNowParents(t *testing.T) {
 			t.Fatalf("zombie %d still listed or still present: %v", left, ds)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestParseStatReadsThreadsAndStartTime(t *testing.T) {
+	// pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime cutime cstime prio nice threads itreal starttime
+	line := []byte("123 (my prog) (x) Z 45 67 89 0 -1 4194560 0 0 0 0 1 2 3 4 20 0 2 0 987654 100\n")
+	info, ok := parseStat(123, line)
+	if !ok || info.threads != 2 || info.start != 987654 || info.state != 'Z' {
+		t.Fatalf("parseStat = %+v, %v", info, ok)
+	}
+	if info.exited() {
+		t.Fatal("a zombie leader with two threads is not exited")
+	}
+	one, _ := parseStat(5, []byte("5 (z) Z 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 50\n"))
+	if !one.exited() {
+		t.Fatal("a one-thread zombie is exited")
+	}
+}
+
+func TestDescendantsSeesAProcessWhoseMainThreadExited(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "counter")
+	var out bytes.Buffer
+	p := startFixture(t, "thread-hider.sh", Spec{Stdout: &out, Env: baseEnv("PROCS_HELPER=threadexit", "PROCS_COUNTER="+counter)})
+	waitFor(t, p, 10*time.Second)
+	hider, err := strconv.Atoi(strings.TrimSpace(out.String()))
+	if err != nil {
+		t.Fatalf("stdout = %q", out.String())
+	}
+	// Wait until the helper has ended its main thread.
+	deadline := time.Now().Add(5 * time.Second)
+	for statOf(t, hider).state != 'Z' {
+		if time.Now().After(deadline) {
+			t.Fatalf("helper %d never showed state Z: %+v", hider, statOf(t, hider))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if statOf(t, hider).threads < 2 {
+		t.Fatalf("helper %d has %d threads; the test needs a running worker", hider, statOf(t, hider).threads)
+	}
+	ds := descendantsSoon(t, p, hider, 3*time.Second)
+	if !contains(ds, hider) {
+		t.Fatalf("Descendants = %v, want the hidden process %d", ds, hider)
+	}
+	before := readCounter(t, counter)
+	res := p.Teardown(quick)
+	if !res.Complete || res.Leftovers != 1 {
+		t.Fatalf("Teardown = %+v", res)
+	}
+	time.Sleep(200 * time.Millisecond)
+	after := readCounter(t, counter)
+	time.Sleep(200 * time.Millisecond)
+	if readCounter(t, counter) != after || after < before {
+		t.Fatalf("counter still moving after teardown: %d -> %d -> %d", before, after, readCounter(t, counter))
+	}
+}
+
+func readCounter(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return n
+}
+
+func TestDescendantsIgnoresAReusedChildPid(t *testing.T) {
+	// A Process whose recorded start time does not match the process now
+	// holding its pid must treat the child as gone and seed nothing.
+	stranger := startFixture(t, "sleep-long.sh", Spec{})
+	fake := &Process{pid: stranger.Pid(), selfPid: os.Getpid(), done: make(chan struct{}), release: make(chan struct{})}
+	close(fake.done)
+	fake.tr = &tracker{pid: stranger.Pid(), start: statOf(t, stranger.Pid()).start + 1, known: true, tracked: map[int]uint64{}}
+	ds, err := fake.Descendants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ds) != 0 {
+		t.Fatalf("Descendants = %v for a reused pid, want none", ds)
+	}
+	res := fake.Teardown(quick)
+	if res.Leftovers != 0 || !alive(stranger.Pid()) {
+		t.Fatalf("Teardown on a reused pid touched the stranger: %+v alive=%v", res, alive(stranger.Pid()))
 	}
 }

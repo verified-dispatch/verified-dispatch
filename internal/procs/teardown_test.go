@@ -10,12 +10,10 @@ import (
 	"time"
 )
 
-var quick = TeardownOptions{TermGrace: 300 * time.Millisecond, Bound: 5 * time.Second}
-
 func TestTeardownEndsARunningChildWithTerm(t *testing.T) {
 	p := startFixture(t, "sleep-long.sh", Spec{})
 	res := p.Teardown(quick)
-	if !res.Complete || res.Killed != 0 || len(res.Remaining) != 0 {
+	if !res.Complete || res.Leftovers != 0 || len(res.Remaining) != 0 {
 		t.Fatalf("result = %+v", res)
 	}
 	st := waitFor(t, p, time.Second)
@@ -66,7 +64,7 @@ func TestTeardownCountsWorkTheChildLeftBehind(t *testing.T) {
 	left, _ := strconv.Atoi(strings.TrimSpace(out.String()))
 	descendantsSoon(t, p, left, 3*time.Second)
 	res := p.Teardown(quick)
-	if !res.Complete || res.Killed != 1 || len(res.Remaining) != 0 {
+	if !res.Complete || res.Leftovers != 1 || len(res.Remaining) != 0 {
 		t.Fatalf("result = %+v, want one leftover killed", res)
 	}
 	if !gone(left, 2*time.Second) {
@@ -81,7 +79,7 @@ func TestTeardownKillsAGrandchildHoldingThePipe(t *testing.T) {
 	holder, _ := strconv.Atoi(strings.TrimSpace(out.String()))
 	descendantsSoon(t, p, holder, 3*time.Second)
 	res := p.Teardown(quick)
-	if !res.Complete || res.Killed != 1 {
+	if !res.Complete || res.Leftovers != 1 {
 		t.Fatalf("result = %+v", res)
 	}
 	if !gone(holder, 2*time.Second) {
@@ -93,7 +91,7 @@ func TestTeardownOnAnExitedChildWithNothingLeftIsClean(t *testing.T) {
 	p := startFixture(t, "exit-code.sh", Spec{})
 	waitFor(t, p, 10*time.Second)
 	res := p.Teardown(quick)
-	if !res.Complete || res.Killed != 0 || len(res.Remaining) != 0 {
+	if !res.Complete || res.Leftovers != 0 || len(res.Remaining) != 0 {
 		t.Fatalf("result = %+v", res)
 	}
 }
@@ -117,11 +115,11 @@ func TestTeardownReportsWhatItCouldNotKill(t *testing.T) {
 	oldList, oldKill := listFn, killFn
 	t.Cleanup(func() { listFn, killFn = oldList, oldKill })
 	listFn = func(p *Process) ([]int, error) { return []int{1}, nil }
-	killFn = func(pid int, sig syscall.Signal) error {
+	killFn = func(p *Process, pid int, sig syscall.Signal) error {
 		if pid == 1 {
 			return syscall.EPERM
 		}
-		return syscall.Kill(pid, sig)
+		return p.tr.kill(pid, sig)
 	}
 	start := time.Now()
 	res := p.Teardown(TeardownOptions{TermGrace: 50 * time.Millisecond, Bound: 300 * time.Millisecond})
@@ -131,8 +129,8 @@ func TestTeardownReportsWhatItCouldNotKill(t *testing.T) {
 	if d := time.Since(start); d < 300*time.Millisecond || d > 3*time.Second {
 		t.Fatalf("teardown took %s, want about the bound", d)
 	}
-	if res.Killed != 0 {
-		t.Fatalf("Killed = %d; a refused kill is not a kill", res.Killed)
+	if res.Leftovers != 0 {
+		t.Fatalf("Killed = %d; a refused kill is not a kill", res.Leftovers)
 	}
 }
 

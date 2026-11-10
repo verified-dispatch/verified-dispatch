@@ -3,8 +3,14 @@ package procs
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 )
+
+func init() {
+	// Helper modes that end the main thread need to run on it.
+	runtime.LockOSThread()
+}
 
 // helpers are modes the test binary runs in when re-executed by a test.
 // Each prints what the test needs and exits. Platform files add theirs.
@@ -12,8 +18,6 @@ var helpers = map[string]func(){}
 
 func init() {
 	helpers["pdeathsig"] = func() {
-		// Start a long-lived child, print its pid, then block. The test
-		// kills this process and checks the child is gone.
 		p, err := Start(Spec{Argv: []string{"bash", os.Getenv("PROCS_FIXTURE")}, Env: []string{"PATH=" + os.Getenv("PATH")}})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
