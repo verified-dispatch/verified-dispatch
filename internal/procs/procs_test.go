@@ -413,7 +413,7 @@ func TestSiblingExitStatusIsNeverCollectedByAnotherChild(t *testing.T) {
 			<-done
 			t.Fatalf("sibling %d: status %v err %v; its exit was collected by another child's scan", i, st, err)
 		}
-		p.Teardown(quick)
+		p.Close()
 	}
 	close(stop)
 	<-done

@@ -154,6 +154,16 @@ func TestTeardownIsIncompleteWhenTheListingFails(t *testing.T) {
 
 func TestTeardownGraceIsCappedByTheBound(t *testing.T) {
 	p := startFixture(t, "ignore-term.sh", Spec{})
+	// Wait until the first sleep exists, which means the trap is set;
+	// otherwise SIGTERM ends the child at once and the grace is never used.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ds, _ := p.Descendants()
+		if len(ds) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	start := time.Now()
 	res := p.Teardown(TeardownOptions{TermGrace: 10 * time.Second, Bound: 1500 * time.Millisecond})
 	if d := time.Since(start); d > 3*time.Second {
