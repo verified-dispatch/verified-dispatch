@@ -41,7 +41,7 @@ func Load(in Inputs) (*Resolved, error) {
 			return nil, err
 		}
 		if u := unknownKeys(md); len(u) > 0 {
-			return nil, fmt.Errorf("home config: unknown key %s", u[0])
+			return nil, fmt.Errorf("home config: unknown key %s", shortKey(u[0]))
 		}
 		if err := lowerCaps(&r, l.Caps); err != nil {
 			return nil, err
@@ -71,7 +71,7 @@ func Load(in Inputs) (*Resolved, error) {
 
 	if in.Repo != nil {
 		if len(in.Repo) > ConfigFileBytes {
-			return nil, refusef("repository config is larger than %d bytes", ConfigFileBytes)
+			return nil, fmt.Errorf("repository config is larger than %d bytes", ConfigFileBytes)
 		}
 		l, md, err := decodeLayer(in.Repo, "repository config")
 		if err != nil {
@@ -247,10 +247,10 @@ func lowerCaps(r *Resolved, c capsLayer) error {
 			return nil
 		}
 		if *v < 1 {
-			return fmt.Errorf("home config sets caps.%s = %d; a cap must be at least 1", key, *v)
+			return refusef("home config sets caps.%s = %d; a cap must be at least 1", key, *v)
 		}
 		if *v > builtin {
-			return fmt.Errorf("home config sets caps.%s = %d, above the built-in cap %d", key, *v, builtin)
+			return refusef("home config sets caps.%s = %d, above the built-in cap %d", key, *v, builtin)
 		}
 		*cur = *v
 		return nil
