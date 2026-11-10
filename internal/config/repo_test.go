@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/verified-dispatch/verified-dispatch/internal/gitx"
@@ -70,8 +71,8 @@ func TestReadRepoBlobRefusesSymlinkAndTree(t *testing.T) {
 	hostGit(t, dir, "commit", "-q", "-m", "symlink")
 	_, _, err := ReadRepoBlob(context.Background(), r)
 	var ref *Refusal
-	if !errors.As(err, &ref) {
-		t.Fatalf("symlink: err = %v, want *Refusal", err)
+	if err == nil || errors.As(err, &ref) || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("symlink: err = %v, want a plain error about a symbolic link", err)
 	}
 
 	dir2, r2 := repoWithHead(t)
@@ -83,8 +84,8 @@ func TestReadRepoBlobRefusesSymlinkAndTree(t *testing.T) {
 	}
 	hostGit(t, dir2, "add", RepoFile)
 	hostGit(t, dir2, "commit", "-q", "-m", "tree")
-	if _, _, err := ReadRepoBlob(context.Background(), r2); !errors.As(err, &ref) {
-		t.Fatalf("tree: err = %v, want *Refusal", err)
+	if _, _, err := ReadRepoBlob(context.Background(), r2); err == nil || errors.As(err, &ref) || !strings.Contains(err.Error(), "tree") {
+		t.Fatalf("tree: err = %v, want a plain error about a tree", err)
 	}
 }
 
@@ -97,7 +98,7 @@ func TestReadRepoBlobRefusesOversizedBlob(t *testing.T) {
 	hostGit(t, dir, "commit", "-q", "-m", "big")
 	_, _, err := ReadRepoBlob(context.Background(), r)
 	var ref *Refusal
-	if !errors.As(err, &ref) {
-		t.Fatalf("oversized: err = %v, want *Refusal", err)
+	if err == nil || errors.As(err, &ref) || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("oversized: err = %v, want a plain error about the size", err)
 	}
 }

@@ -182,8 +182,8 @@ func TestLoadHomeCapsOnlyLower(t *testing.T) {
 		t.Fatalf("defaults were not pulled down to the lowered caps: %+v %+v", r.Limits, r.Gate)
 	}
 	wantRefusal(t, Inputs{Home: []byte(home), Repo: []byte("[gate]\ncommand = \"x\"\n[limits]\nwall_clock_minutes = 61\n")}, "above the cap 60")
-	wantPlainError(t, Inputs{Home: []byte("[caps]\nwall_clock_minutes = 91\n"), Flags: Flags{Gate: "x"}}, "above the built-in cap")
-	wantPlainError(t, Inputs{Home: []byte("[caps]\nwall_clock_minutes = 0\n"), Flags: Flags{Gate: "x"}}, "at least 1")
+	wantRefusal(t, Inputs{Home: []byte("[caps]\nwall_clock_minutes = 91\n"), Flags: Flags{Gate: "x"}}, "home config sets caps.wall_clock_minutes = 91, above the built-in cap 90")
+	wantRefusal(t, Inputs{Home: []byte("[caps]\nwall_clock_minutes = 0\n"), Flags: Flags{Gate: "x"}}, "at least 1")
 }
 
 func TestLoadRefusesRepositoryEscalations(t *testing.T) {
@@ -199,7 +199,7 @@ func TestLoadRefusesRepositoryEscalations(t *testing.T) {
 	wantRefusal(t, Inputs{Repo: []byte("[gate]\ncommand = \"   \"\n")}, "empty command")
 	wantRefusal(t, Inputs{Repo: []byte("[gate]\ncommand = \"" + strings.Repeat("x", MaxCommandBytes+1) + "\"\n")}, "gate.command")
 	wantPlainError(t, Inputs{Repo: []byte("[gate\ncommand = \"x\"\n")}, "repository config")
-	wantRefusal(t, Inputs{Repo: make([]byte, ConfigFileBytes+1)}, "larger than")
+	wantPlainError(t, Inputs{Repo: make([]byte, ConfigFileBytes+1)}, "larger than")
 	many := "[gate]\ncommand = \"x\"\n[condense]\npatterns = [" + strings.TrimSuffix(strings.Repeat("\"p\",", MaxPatterns+1), ",") + "]\n"
 	wantRefusal(t, Inputs{Repo: []byte(many)}, "condense.patterns")
 }
@@ -335,5 +335,17 @@ func TestLoadHomePresetPinsTheBuilder(t *testing.T) {
 	b := mustLoad(t, Inputs{Home: []byte(home), Repo: []byte("[gate]\ncommand = \"x\"\n")})
 	if a.RepoLayerHash == b.RepoLayerHash {
 		t.Fatal("an ignored builder.preset did not change RepoLayerHash")
+	}
+}
+
+func TestLoadTruncatesEchoedKeys(t *testing.T) {
+	key := strings.Repeat("k", MaxKeyBytes)
+	_, err := Load(Inputs{Repo: []byte("[gate]\ncommand = \"x\"\n" + key + " = 1\n")})
+	if err == nil || len(err.Error()) > 200 || !strings.Contains(err.Error(), "...") {
+		t.Fatalf("err = %v (len %d), want a short message with a truncated key", err, len(fmt.Sprint(err)))
+	}
+	_, err = Load(Inputs{Home: []byte(key + " = 1\n"), Flags: Flags{Gate: "x"}})
+	if err == nil || len(err.Error()) > 200 || !strings.Contains(err.Error(), "...") {
+		t.Fatalf("home err = %v, want a short message with a truncated key", err)
 	}
 }
