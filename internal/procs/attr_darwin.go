@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // sysProcAttr puts the child in a new session and process group. macOS has
@@ -26,16 +28,13 @@ func EnableSubreaper() error { return nil }
 
 func ensureSubreaper() error { return nil }
 
-// ptDenyAttach is the ptrace request that refuses later attachment, from
-// <sys/ptrace.h>.
-const ptDenyAttach = 31
-
 // DisableAttach asks the kernel to refuse debugger attachment and stops
-// core dumps. The request goes through the raw system call interface,
-// which Apple does not support; a later batch moves it to the C library.
+// core dumps. If a debugger is attached already the kernel ends the
+// process, which is the right outcome for a tool that holds a key in
+// memory.
 func DisableAttach() error {
-	if _, _, e := syscall.Syscall6(syscall.SYS_PTRACE, ptDenyAttach, 0, 0, 0, 0, 0); e != 0 {
-		return fmt.Errorf("procs: ptrace(PT_DENY_ATTACH): %w", e)
+	if err := unix.PtraceDenyAttach(); err != nil {
+		return fmt.Errorf("procs: refuse attachment: %w", err)
 	}
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		return fmt.Errorf("procs: disable core dumps: %w", err)

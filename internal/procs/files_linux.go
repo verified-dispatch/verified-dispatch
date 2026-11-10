@@ -4,26 +4,19 @@ package procs
 
 import (
 	"errors"
-	"syscall"
-)
 
-// close_range(2) and its flag, from <linux/close_range.h>. The system call
-// number is 436 on every 64-bit Linux architecture Go supports.
-const (
-	sysCloseRange     = 436
-	closeRangeCloexec = 1 << 2
-	highestDescriptor = ^uintptr(0)
+	"golang.org/x/sys/unix"
 )
 
 // closeOnExecAll uses close_range when the kernel has it (5.11 and later)
 // and falls back to marking each descriptor listed in /proc/self/fd.
 func closeOnExecAll() error {
-	_, _, e := syscall.Syscall(sysCloseRange, 3, highestDescriptor, closeRangeCloexec)
-	if e == 0 {
+	err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC)
+	if err == nil {
 		return nil
 	}
-	if !errors.Is(e, syscall.ENOSYS) && !errors.Is(e, syscall.EINVAL) {
-		return e
+	if !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EINVAL) {
+		return err
 	}
 	return markFrom("/proc/self/fd")
 }
