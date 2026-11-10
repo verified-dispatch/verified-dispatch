@@ -13,9 +13,9 @@ import (
 const RepoFile = ".vdispatch.toml"
 
 // ReadRepoBlob reads RepoFile from the top level of the HEAD tree through
-// r, never from disk and whatever the current directory. present is false when HEAD has no such entry. An entry that is not
-// a regular blob (a symlink or a directory), or a blob over ConfigFileBytes,
-// is an error.
+// r, never from disk and whatever the current directory. present is false
+// when HEAD has no such entry. An entry that is not a regular blob (a
+// symlink or a directory), or a blob over ConfigFileBytes, is an error.
 func ReadRepoBlob(ctx context.Context, r gitx.Runner) (data []byte, present bool, err error) {
 	out, err := r.Run(ctx, "ls-tree", "-z", "--full-tree", "HEAD", "--", RepoFile)
 	if err != nil {

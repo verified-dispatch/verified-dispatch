@@ -139,19 +139,20 @@ func checkRepoKeys(md toml.MetaData) error {
 		case k == "presets" || strings.HasPrefix(k, "presets."):
 			return refusef("repository config may not define presets")
 		default:
-			return refusef("repository config sets %s, which is not an allowed key", shortKey(k))
+			return refusef("repository config sets %s, which is not an allowed key", short(k))
 		}
 	}
 	return nil
 }
 
-// maxEchoedKeyBytes bounds a key echoed in a message.
-const maxEchoedKeyBytes = 80
+// maxEchoedBytes bounds a key or value echoed in a message.
+const maxEchoedBytes = 80
 
-// shortKey truncates k for a message.
-func shortKey(k string) string {
-	if len(k) <= maxEchoedKeyBytes {
-		return k
+// short truncates a key or value to maxEchoedBytes for a message, so a
+// long entry in a configuration file cannot flood the output.
+func short(s string) string {
+	if len(s) <= maxEchoedBytes {
+		return s
 	}
-	return k[:maxEchoedKeyBytes] + "..."
+	return s[:maxEchoedBytes] + "..."
 }

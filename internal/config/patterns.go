@@ -34,7 +34,11 @@ func checkPattern(who, key, p string) error {
 	if cost > MaxPatternInstructions {
 		return refusef("%s sets %s with an entry of %d instructions, above the limit %d", who, key, cost, MaxPatternInstructions)
 	}
-	if regexp.MustCompile(p).MatchString("") {
+	re, err := regexp.Compile(p)
+	if err != nil {
+		return refusef("%s sets %s with an entry that does not compile: %v", who, key, err)
+	}
+	if re.MatchString("") {
 		return refusef("%s sets %s with an entry that matches the empty string, which would match every line", who, key)
 	}
 	return nil
@@ -49,7 +53,7 @@ func checkPatternBudget(lists ...[]string) error {
 		for _, p := range l {
 			cost, err := patternCost(p)
 			if err != nil {
-				return refusef("pattern %q does not compile: %v", p, err)
+				return refusef("pattern %q does not compile: %v", short(p), err)
 			}
 			total += cost
 		}

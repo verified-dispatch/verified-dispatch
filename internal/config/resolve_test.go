@@ -349,3 +349,12 @@ func TestLoadTruncatesEchoedKeys(t *testing.T) {
 		t.Fatalf("home err = %v, want a short message with a truncated key", err)
 	}
 }
+
+func TestLoadTruncatesEchoedValues(t *testing.T) {
+	long := "../" + strings.Repeat("a", 3997)
+	_, err := Load(Inputs{Repo: []byte("[gate]\ncommand = \"x\"\nprotected = [\"" + long + "\"]\n")})
+	var r *Refusal
+	if !errors.As(err, &r) || len(err.Error()) >= 300 || !strings.Contains(err.Error(), "...") {
+		t.Fatalf("err = %v (len %d), want a refusal under 300 bytes with a truncated path", err, len(fmt.Sprint(err)))
+	}
+}

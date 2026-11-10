@@ -41,7 +41,7 @@ func Load(in Inputs) (*Resolved, error) {
 			return nil, err
 		}
 		if u := unknownKeys(md); len(u) > 0 {
-			return nil, fmt.Errorf("home config: unknown key %s", shortKey(u[0]))
+			return nil, fmt.Errorf("home config: unknown key %s", short(u[0]))
 		}
 		if err := lowerCaps(&r, l.Caps); err != nil {
 			return nil, err
@@ -212,7 +212,7 @@ func apply(r *Resolved, l *layer, src Source) error {
 
 	if l.Contract.CommitStyle != nil {
 		if s := *l.Contract.CommitStyle; s != "conventional" && s != "any" {
-			return refusef("%s sets contract.commit_style = %q; it must be \"conventional\" or \"any\"", who, s)
+			return refusef("%s sets contract.commit_style = %q; it must be \"conventional\" or \"any\"", who, short(s))
 		}
 		r.Contract.CommitStyle = *l.Contract.CommitStyle
 	}
@@ -376,21 +376,21 @@ func checkPath(who, key, p string, kind pathKind) error {
 		return refusef("%s sets %s with an entry that holds a control character", who, key)
 	}
 	if !filepath.IsLocal(p) {
-		return refusef("%s sets %s entry %q, which is not a local relative path", who, key, p)
+		return refusef("%s sets %s entry %q, which is not a local relative path", who, key, short(p))
 	}
 	if filepath.Clean(p) != p {
-		return refusef("%s sets %s entry %q, which is not in clean form (write it as %q)", who, key, p, filepath.Clean(p))
+		return refusef("%s sets %s entry %q, which is not in clean form (write it as %q)", who, key, short(p), short(filepath.Clean(p)))
 	}
 	for _, part := range strings.Split(p, "/") {
 		if strings.EqualFold(part, ".git") {
-			return refusef("%s sets %s entry %q, which names a .git component", who, key, p)
+			return refusef("%s sets %s entry %q, which names a .git component", who, key, short(p))
 		}
 		if kind == pathInput && strings.HasPrefix(part, ".vdispatch") {
-			return refusef("%s sets %s entry %q, which may not name a .vdispatch file", who, key, p)
+			return refusef("%s sets %s entry %q, which may not name a .vdispatch file", who, key, short(p))
 		}
 	}
 	if kind == pathInput && p == "." {
-		return refusef("%s sets %s to %q, which is the top level, not a file", who, key, p)
+		return refusef("%s sets %s to %q, which is the top level, not a file", who, key, short(p))
 	}
 	return nil
 }
@@ -421,14 +421,19 @@ func validate(r *Resolved) error {
 	if r.Gate.Command == "" {
 		return refusef("no gate command is configured; set gate.command in %s or pass --gate", RepoFile)
 	}
-	for key, l := range map[string][]string{"gate.prepare_inputs": r.Gate.PrepareInputs, "gate.protected": r.Gate.Protected} {
-		if len(l) > MaxPathEntries {
-			return refusef("%s has %d entries after merging the layers, above the limit %d", key, len(l), MaxPathEntries)
-		}
+	type merged struct {
+		key  string
+		list []string
+		max  int
 	}
-	for key, l := range map[string][]string{"condense.patterns": r.Condense, "redaction.patterns": r.Redaction} {
-		if len(l) > MaxPatterns {
-			return refusef("%s has %d entries after merging the layers, above the limit %d", key, len(l), MaxPatterns)
+	for _, m := range []merged{
+		{"gate.prepare_inputs", r.Gate.PrepareInputs, MaxPathEntries},
+		{"gate.protected", r.Gate.Protected, MaxPathEntries},
+		{"condense.patterns", r.Condense, MaxPatterns},
+		{"redaction.patterns", r.Redaction, MaxPatterns},
+	} {
+		if len(m.list) > m.max {
+			return refusef("%s has %d entries after merging the layers, above the limit %d", m.key, len(m.list), m.max)
 		}
 	}
 	return checkPatternBudget(r.Condense, r.Redaction)
