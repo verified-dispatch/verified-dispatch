@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -188,13 +187,11 @@ func apply(r *Resolved, l *layer, src Source) error {
 		r.Limits.OutputBytes = int64(*v) << 20
 	}
 
-	// Bound each layer's own list before merging, so duplicates that the
-	// merge drops still count against the limit.
-	if n := len(l.Condense.Patterns); n > MaxPatterns {
-		return refusef("%s sets condense.patterns with %d entries, above the limit %d", who, n, MaxPatterns)
+	if err := checkPatternList(who, "condense.patterns", l.Condense.Patterns); err != nil {
+		return err
 	}
-	if n := len(l.Redaction.Patterns); n > MaxPatterns {
-		return refusef("%s sets redaction.patterns with %d entries, above the limit %d", who, n, MaxPatterns)
+	if err := checkPatternList(who, "redaction.patterns", l.Redaction.Patterns); err != nil {
+		return err
 	}
 	r.Condense = mergeList(r.Condense, l.Condense.Patterns)
 	r.Redaction = mergeList(r.Redaction, l.Redaction.Patterns)
@@ -209,6 +206,20 @@ func apply(r *Resolved, l *layer, src Source) error {
 			return refusef("%s sets contract.additions %q, which is not a local relative path", who, *l.Contract.Additions)
 		}
 		r.Contract.Additions = *l.Contract.Additions
+	}
+	return nil
+}
+
+// checkPatternList bounds one layer's own list before merging, so entries
+// the merge drops as duplicates still count, and checks every entry.
+func checkPatternList(who, key string, patterns []string) error {
+	if n := len(patterns); n > MaxPatterns {
+		return refusef("%s sets %s with %d entries, above the limit %d", who, key, n, MaxPatterns)
+	}
+	for _, p := range patterns {
+		if err := checkPattern(who, key, p); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -330,23 +341,5 @@ func validate(r *Resolved) error {
 	if r.Contract.Additions != "" && !filepath.IsLocal(r.Contract.Additions) {
 		return refusef("contract.additions %q is not a local relative path", r.Contract.Additions)
 	}
-	if err := checkPatterns("condense.patterns", r.Condense); err != nil {
-		return err
-	}
-	return checkPatterns("redaction.patterns", r.Redaction)
-}
-
-func checkPatterns(key string, patterns []string) error {
-	if len(patterns) > MaxPatterns {
-		return refusef("%s has %d entries, above the limit %d", key, len(patterns), MaxPatterns)
-	}
-	for _, p := range patterns {
-		if len(p) > MaxPatternBytes {
-			return refusef("%s entry is %d bytes, above the limit %d", key, len(p), MaxPatternBytes)
-		}
-		if _, err := regexp.Compile(p); err != nil {
-			return refusef("%s entry %q does not compile: %v", key, p, err)
-		}
-	}
-	return nil
+	return checkPatternBudget(r.Condense, r.Redaction)
 }

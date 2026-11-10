@@ -31,6 +31,11 @@ const (
 	MaxPatterns = 64
 	// MaxPatternBytes caps one pattern.
 	MaxPatternBytes = 512
+	// MaxPatternInstructions caps the compiled program of one pattern.
+	MaxPatternInstructions = 2000
+	// MaxRunPatternInstructions caps the compiled programs of every pattern
+	// in one run, condense and redaction together.
+	MaxRunPatternInstructions = 20000
 	// MaxCommandBytes caps the gate and prepare commands.
 	MaxCommandBytes = 4096
 )
