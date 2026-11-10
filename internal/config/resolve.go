@@ -166,7 +166,12 @@ func apply(r *Resolved, l *layer, src Source) error {
 	}
 	r.Gate.Protected = mergeList(r.Gate.Protected, l.Gate.Protected)
 
-	if l.Builder.Preset != nil {
+	if l.Builder.Preset != nil && !(src == SourceRepo && r.Sources.Builder == SourceHome) {
+		// The builder command is the user's. A home choice stands against
+		// a repository; a repository chooses only when the home config
+		// names no preset. An ignored repository choice is still part of
+		// the decoded layer and so of RepoLayerHash. The flag layer is
+		// applied by Load and wins over both.
 		r.Builder.Preset = *l.Builder.Preset
 		r.Sources.Builder = src
 	}

@@ -52,16 +52,16 @@ func embeddedPresets() (map[string]Preset, error) {
 
 // resolvePreset finds the preset named by a layer under the trust rules: a
 // home preset wins over an embedded one of the same name; a repository may
-// name an embedded preset or a home preset marked repo_selectable, and
-// nothing else.
+// name only a preset, home or embedded, that is marked repo_selectable.
 func resolvePreset(name string, src Source, embedded, home map[string]Preset) (Preset, error) {
-	if p, ok := home[name]; ok {
-		if src == SourceRepo && !p.RepoSelectable {
-			return Preset{}, refusef("repository config names preset %q, which the home config does not mark repo_selectable", name)
-		}
-		return p, nil
+	p, ok := home[name]
+	if !ok {
+		p, ok = embedded[name]
 	}
-	if p, ok := embedded[name]; ok {
+	if ok {
+		if src == SourceRepo && !p.RepoSelectable {
+			return Preset{}, refusef("repository config names preset %q, which is not marked repo_selectable", name)
+		}
 		return p, nil
 	}
 	switch src {

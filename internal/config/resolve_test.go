@@ -306,3 +306,34 @@ func TestLoadRepoLayerHashCoversEveryRepositoryKey(t *testing.T) {
 		t.Fatal("a comment changed RepoLayerHash")
 	}
 }
+
+func TestLoadHomePresetPinsTheBuilder(t *testing.T) {
+	home := "[builder]\npreset = \"claude-code\"\n"
+	repo := "[gate]\ncommand = \"x\"\n[builder]\npreset = \"codex\"\n"
+	r := mustLoad(t, Inputs{Home: []byte(home), Repo: []byte(repo)})
+	if r.Builder.Preset != "claude-code" || r.Sources.Builder != SourceHome {
+		t.Fatalf("builder = %q from %s; the home choice must stand", r.Builder.Preset, r.Sources.Builder)
+	}
+	// A repository preset the home config ignores is not resolved, so it
+	// need not exist.
+	r = mustLoad(t, Inputs{Home: []byte(home), Repo: []byte(strings.Replace(repo, "codex", "ghost", 1))})
+	if r.Builder.Preset != "claude-code" {
+		t.Fatalf("builder = %q", r.Builder.Preset)
+	}
+	// With no home choice the repository may pick an embedded preset.
+	r = mustLoad(t, Inputs{Repo: []byte(repo)})
+	if r.Builder.Preset != "codex" || r.Sources.Builder != SourceRepo {
+		t.Fatalf("builder = %q from %s", r.Builder.Preset, r.Sources.Builder)
+	}
+	// A flag beats both.
+	r = mustLoad(t, Inputs{Home: []byte(home), Repo: []byte(repo), Flags: Flags{Builder: "codex"}})
+	if r.Builder.Preset != "codex" || r.Sources.Builder != SourceFlag {
+		t.Fatalf("builder = %q from %s", r.Builder.Preset, r.Sources.Builder)
+	}
+	// The ignored repository choice still changes the repository layer hash.
+	a := mustLoad(t, Inputs{Home: []byte(home), Repo: []byte(repo)})
+	b := mustLoad(t, Inputs{Home: []byte(home), Repo: []byte("[gate]\ncommand = \"x\"\n")})
+	if a.RepoLayerHash == b.RepoLayerHash {
+		t.Fatal("an ignored builder.preset did not change RepoLayerHash")
+	}
+}
