@@ -1,11 +1,13 @@
 package procs
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -208,5 +210,79 @@ func TestCappedOutputDoesNotBlockTheChild(t *testing.T) {
 	case <-c.Capped():
 	default:
 		t.Fatal("Capped not closed")
+	}
+}
+
+// runHelper re-executes the test binary in a helper mode with the given
+// fixture and returns the started command and its stdout pipe.
+func runHelper(t *testing.T, mode, fixtureName string) (*exec.Cmd, *bufio.Reader) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "PROCS_HELPER="+mode, "PROCS_FIXTURE="+fixture(t, fixtureName))
+	cmd.Stderr = os.Stderr
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	return cmd, bufio.NewReader(out)
+}
+
+func readPid(t *testing.T, r *bufio.Reader) int {
+	t.Helper()
+	line, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("pid line %q", line)
+	}
+	return pid
+}
+
+// gone waits up to d for pid to disappear or become a zombie.
+func gone(pid int, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if !alive(pid) {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+func TestContainmentNamesThePlatformMechanism(t *testing.T) {
+	c := Containment()
+	if !strings.HasPrefix(c, "containment: ") {
+		t.Fatalf("Containment() = %q", c)
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if !strings.Contains(c, "subreaper") || !strings.Contains(c, "parent-death") {
+			t.Fatalf("Containment() = %q", c)
+		}
+	case "darwin":
+		if !strings.Contains(c, "observed descendants") || !strings.Contains(c, "1 s poll") {
+			t.Fatalf("Containment() = %q", c)
+		}
+	}
+}
+
+func TestDisableAttachSucceeds(t *testing.T) {
+	// The flag is checked for real in a helper on Linux; here only that
+	// the call works on this platform.
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "PROCS_HELPER=attach")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper: %v: %s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		t.Fatalf("helper printed %q, want ok", out)
 	}
 }

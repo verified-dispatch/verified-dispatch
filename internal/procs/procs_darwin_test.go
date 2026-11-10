@@ -30,3 +30,7 @@ func isZombie(pid int) bool {
 	}
 	return strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
+
+// checkAttachDisabled has nothing to read back on macOS; PT_DENY_ATTACH
+// returning without error is the check.
+func checkAttachDisabled() error { return nil }
