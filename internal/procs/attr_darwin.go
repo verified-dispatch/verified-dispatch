@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -39,11 +40,21 @@ func DisableAttach() error {
 
 // Containment is the receipt line that says how children are contained on
 // this platform and what is not covered.
-func Containment() string {
+func Containment() string { return containmentFor(false) }
+
+// containmentFor is the receipt line. macOS has no cgroup, so the line is
+// the same for every child.
+func containmentFor(bool) string {
 	return "containment: session and process group, descendants observed every second (1 s poll); " +
 		"not covered: work handed to a process outside the tool's view, a child that stops or kills the tool, " +
 		"a process that leaves the child's group and whose parent exits between two polls"
 }
+
+// preKill has nothing to do on macOS, which has no cgroup.
+func (p *Process) preKill() {}
+
+// postKill has nothing to do on macOS, which has no cgroup.
+func (p *Process) postKill(time.Duration) error { return nil }
 
 // procInfo is one entry of the kernel's process table.
 type procInfo struct {

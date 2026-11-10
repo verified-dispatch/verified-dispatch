@@ -439,3 +439,11 @@ func TestStartNamesAMissingDirectory(t *testing.T) {
 		t.Fatalf("err = %v, want it to name the directory", err)
 	}
 }
+
+func TestContainmentMethodStartsFromThePlatformLine(t *testing.T) {
+	p := startFixture(t, "exit-code.sh", Spec{})
+	waitFor(t, p, 10*time.Second)
+	if !strings.HasPrefix(p.Containment(), "containment: ") || !strings.Contains(p.Containment(), "not covered:") {
+		t.Fatalf("Containment() = %q", p.Containment())
+	}
+}

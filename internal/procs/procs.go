@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Spec describes one child.
@@ -61,6 +63,7 @@ type Process struct {
 	status    Status
 	waitErr   error
 	tr        *tracker // platform tracking of the child and its descendants
+	cg        *cgroup  // the child's own cgroup; nil when none was available
 	obs       *observer
 	closeOnce sync.Once
 }
@@ -94,25 +97,29 @@ func Start(spec Spec) (*Process, error) {
 	if err := ensureSubreaper(); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
-	cmd.Dir = spec.Dir
-	cmd.Env = spec.Env
-	if cmd.Env == nil {
-		// exec.Cmd treats a nil Env as "inherit"; this package never does.
-		cmd.Env = []string{}
-	}
-	cmd.Stdin = spec.Stdin
-	cmd.Stdout = spec.Stdout
-	cmd.Stderr = spec.Stderr
-	cmd.SysProcAttr = sysProcAttr()
-	cmd.WaitDelay = waitDelay
 
 	p := &Process{
-		cmd:     cmd,
 		selfPid: os.Getpid(),
 		done:    make(chan struct{}),
 		release: make(chan struct{}),
 	}
+	// A cgroup is tried for every child; whether one can be made is
+	// decided here each time, never remembered.
+	p.cg = newCgroup()
+	attr := sysProcAttr()
+	cgFD := -1
+	if p.cg != nil {
+		fd, err := p.cg.openFD()
+		if err != nil {
+			_ = p.cg.remove(0)
+			p.cg = nil
+		} else {
+			cgFD = fd
+			cloneIntoCgroup(attr, fd)
+		}
+	}
+	cmd := command(spec, attr)
+	withoutCgroup := false
 	started := make(chan error, 1)
 	go func() {
 		// On Linux the parent-death signal is tied to the thread that
@@ -126,6 +133,15 @@ func Start(spec Spec) (*Process, error) {
 		// then and is never attributed to another child or reaped.
 		live.Lock()
 		err := cmd.Start()
+		if err != nil && cgFD >= 0 {
+			// This kernel or this cgroup could not take the child at
+			// clone time. Retry without a cgroup. An exec.Cmd starts only
+			// once, so the retry builds a new one. If the failure had
+			// another cause, the retry fails the same way.
+			cmd = command(spec, sysProcAttr())
+			withoutCgroup = true
+			err = cmd.Start()
+		}
 		if err == nil {
 			live.m[cmd.Process.Pid] = true
 		}
@@ -136,9 +152,18 @@ func Start(spec Spec) (*Process, error) {
 		}
 		runtime.UnlockOSThread()
 	}()
-	if err := <-started; err != nil {
+	err := <-started
+	if cgFD >= 0 {
+		_ = unix.Close(cgFD)
+	}
+	if p.cg != nil && (err != nil || withoutCgroup) {
+		_ = p.cg.remove(0)
+		p.cg = nil
+	}
+	if err != nil {
 		return nil, fmt.Errorf("procs: start %s: %w", spec.Argv[0], err)
 	}
+	p.cmd = cmd
 	p.pid = cmd.Process.Pid
 	p.startedAt = time.Now()
 	// The tracker reads the child's start time before anything can reap
@@ -152,6 +177,23 @@ func Start(spec Spec) (*Process, error) {
 	}()
 	p.obs = startObserver(p)
 	return p, nil
+}
+
+// command builds the exec.Cmd for spec with the given process attributes.
+func command(spec Spec, attr *syscall.SysProcAttr) *exec.Cmd {
+	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	cmd.Dir = spec.Dir
+	cmd.Env = spec.Env
+	if cmd.Env == nil {
+		// exec.Cmd treats a nil Env as "inherit"; this package never does.
+		cmd.Env = []string{}
+	}
+	cmd.Stdin = spec.Stdin
+	cmd.Stdout = spec.Stdout
+	cmd.Stderr = spec.Stderr
+	cmd.SysProcAttr = attr
+	cmd.WaitDelay = waitDelay
+	return cmd
 }
 
 // statusOf turns the result of exec.Cmd.Wait into a Status. A nonzero exit
@@ -176,6 +218,12 @@ func (p *Process) Pid() int { return p.pid }
 
 // StartedAt is when the child started.
 func (p *Process) StartedAt() time.Time { return p.startedAt }
+
+// Containment is the receipt line for this child: the platform mechanism,
+// whether a cgroup was in force, and the gaps that remain.
+func (p *Process) Containment() string {
+	return containmentFor(p.cg != nil)
+}
 
 // Wait returns the child's status once it has exited, or ctx's error. It
 // never kills anything; the caller tears down.
@@ -231,8 +279,9 @@ func startObserver(p *Process) *observer {
 	return o
 }
 
-// Close stops the observer and removes the child from the registry. It is
-// safe to call more than once. Teardown calls it.
+// Close stops the observer, removes the child from the registry, and
+// removes the child's cgroup if it is empty. It is safe to call more than
+// once. Teardown calls it.
 func (p *Process) Close() {
 	p.closeOnce.Do(func() {
 		if p.obs != nil {
@@ -242,6 +291,9 @@ func (p *Process) Close() {
 		live.Lock()
 		delete(live.m, p.pid)
 		live.Unlock()
+		if p.cg != nil {
+			_ = p.cg.remove(0)
+		}
 	})
 }
 
