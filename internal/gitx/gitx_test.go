@@ -112,7 +112,7 @@ func TestBaseEnvDropsGitVariablesAndAddsFixedOnes(t *testing.T) {
 			t.Fatalf("BaseEnv kept inherited %q", kv)
 		}
 	}
-	for _, want := range append([]string{"GIT_CONFIG_GLOBAL=/dev/null", "LC_ALL=C"}, FixedEnv...) {
+	for _, want := range append([]string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_LITERAL_PATHSPECS=1", "LC_ALL=C"}, FixedEnv...) {
 		found := false
 		for _, kv := range env {
 			if kv == want {

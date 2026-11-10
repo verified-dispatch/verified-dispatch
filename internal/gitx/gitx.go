@@ -29,6 +29,9 @@ var FixedEnv = []string{
 	"GIT_CONFIG_GLOBAL=/dev/null",
 	"GIT_NO_REPLACE_OBJECTS=1",
 	"GIT_NO_LAZY_FETCH=1",
+	// Paths this tool passes to git are literal, never pathspec syntax
+	// such as ":(glob)" or ":(top)".
+	"GIT_LITERAL_PATHSPECS=1",
 	"GIT_OPTIONAL_LOCKS=0",
 	"GIT_TERMINAL_PROMPT=0",
 	"LC_ALL=C",

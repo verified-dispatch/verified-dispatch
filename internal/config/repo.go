@@ -12,12 +12,12 @@ import (
 // RepoFile is the repository configuration path, relative to the top level.
 const RepoFile = ".vdispatch.toml"
 
-// ReadRepoBlob reads RepoFile from the HEAD tree through r, never from
-// disk. present is false when HEAD has no such entry. An entry that is not
+// ReadRepoBlob reads RepoFile from the top level of the HEAD tree through
+// r, never from disk and whatever the current directory. present is false when HEAD has no such entry. An entry that is not
 // a regular blob (a symlink or a directory), or a blob over ConfigFileBytes,
 // is an error.
 func ReadRepoBlob(ctx context.Context, r gitx.Runner) (data []byte, present bool, err error) {
-	out, err := r.Run(ctx, "ls-tree", "-z", "HEAD", "--", RepoFile)
+	out, err := r.Run(ctx, "ls-tree", "-z", "--full-tree", "HEAD", "--", RepoFile)
 	if err != nil {
 		return nil, false, err
 	}
