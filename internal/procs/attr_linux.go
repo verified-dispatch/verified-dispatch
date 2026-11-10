@@ -4,6 +4,7 @@ package procs
 
 import (
 	"bytes"
+	"fmt"
 	"strconv"
 	"strings"
 	"syscall"
@@ -50,4 +51,48 @@ func parseStat(pid int, b []byte) (procInfo, bool) {
 		return procInfo{}, false
 	}
 	return procInfo{pid: pid, ppid: ppid, pgid: pgid, sid: sid, zombie: f[0] == "Z"}, true
+}
+
+// prctl options this package uses, from <linux/prctl.h>.
+const (
+	prGetDumpable       = 3
+	prSetDumpable       = 4
+	prSetChildSubreaper = 36
+)
+
+func prctl(option, arg uintptr) (uintptr, error) {
+	r, _, e := syscall.Syscall(syscall.SYS_PRCTL, option, arg, 0)
+	if e != 0 {
+		return 0, fmt.Errorf("procs: prctl(%d): %w", option, e)
+	}
+	return r, nil
+}
+
+// EnableSubreaper makes this process the parent of every descendant that
+// is orphaned below it, so a process the child left behind is visible as
+// a direct child here instead of vanishing under init.
+func EnableSubreaper() error {
+	_, err := prctl(prSetChildSubreaper, 1)
+	return err
+}
+
+// DisableAttach stops a same-user debugger from attaching to this process
+// and stops core dumps, so the per-run key and the resolved configuration
+// held in memory cannot be read from outside. A host that lets a capable
+// debugger attach regardless is outside this guard; the docs say so.
+func DisableAttach() error {
+	_, err := prctl(prSetDumpable, 0)
+	return err
+}
+
+// dumpable reads the flag DisableAttach clears. Tests use it.
+func dumpable() (int, error) {
+	r, err := prctl(prGetDumpable, 0)
+	return int(r), err
+}
+
+// Containment is the receipt line that says how children are contained on
+// this platform.
+func Containment() string {
+	return "containment: session and process group, child subreaper, parent-death signal"
 }
