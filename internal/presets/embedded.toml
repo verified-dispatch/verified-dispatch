@@ -1,6 +1,7 @@
 # Builder presets built into vdispatch. The home config can add presets or
-# replace these by name. A repository config may name one of these only when
-# the home config names no preset of its own.
+# replace these by name. A repository config may name a preset only when the
+# home config names no preset of its own and the preset is marked
+# repo_selectable.
 
 [presets.claude-code]
 command = ["claude", "-p", "--permission-mode", "acceptEdits", "--output-format", "json"]

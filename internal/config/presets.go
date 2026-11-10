@@ -60,15 +60,15 @@ func resolvePreset(name string, src Source, embedded, home map[string]Preset) (P
 	}
 	if ok {
 		if src == SourceRepo && !p.RepoSelectable {
-			return Preset{}, refusef("repository config names preset %q, which is not marked repo_selectable", name)
+			return Preset{}, refusef("repository config names preset %q, which is not marked repo_selectable", short(name))
 		}
 		return p, nil
 	}
 	switch src {
 	case SourceRepo:
-		return Preset{}, refusef("repository config names preset %q, which is not defined", name)
+		return Preset{}, refusef("repository config names preset %q, which is not defined", short(name))
 	case SourceFlag:
-		return Preset{}, refusef("--builder names preset %q, which is not defined", name)
+		return Preset{}, refusef("--builder names preset %q, which is not defined", short(name))
 	default:
 		return Preset{}, fmt.Errorf("%s config names preset %q, which is not defined", src, name)
 	}
