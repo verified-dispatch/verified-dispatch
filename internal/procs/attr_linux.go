@@ -258,16 +258,37 @@ func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
 	return alive, reaped, nil
 }
 
-// kill sends sig to pid only if it is still the tracked process.
+// kill sends sig to pid only if it is still the tracked process. The pidfd
+// is opened first, then the start time is checked, so a pid reused after
+// the open points the pidfd at the dead process and the signal is
+// harmless. A kernel without pidfd falls back to a check then kill.
 func (t *tracker) kill(pid int, sig syscall.Signal) error {
 	t.mu.Lock()
 	start, ok := t.tracked[pid]
 	t.mu.Unlock()
-	info, present := readStat(pid)
-	if !ok || !present || info.start != start {
+	if !ok {
 		return syscall.ESRCH
 	}
-	return syscall.Kill(pid, sig)
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		if !errors.Is(err, unix.ENOSYS) {
+			return syscall.ESRCH
+		}
+		info, present := readStat(pid)
+		if !present || info.start != start {
+			return syscall.ESRCH
+		}
+		return syscall.Kill(pid, sig)
+	}
+	defer unix.Close(fd)
+	info, present := readStat(pid)
+	if !present || info.start != start {
+		return syscall.ESRCH
+	}
+	if err := unix.PidfdSendSignal(fd, unix.Signal(sig), nil, 0); err != nil {
+		return err
+	}
+	return nil
 }
 
 // killGroup signals the child's process group while the child is still
