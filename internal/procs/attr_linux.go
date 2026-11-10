@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // sysProcAttr puts the child in a new session and process group and has
@@ -20,28 +22,15 @@ func sysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 }
 
-// prctl options this package uses, from <linux/prctl.h>.
-const (
-	prGetDumpable       = 3
-	prSetDumpable       = 4
-	prSetChildSubreaper = 36
-)
-
-func prctl(option, arg uintptr) (uintptr, error) {
-	r, _, e := syscall.Syscall(syscall.SYS_PRCTL, option, arg, 0)
-	if e != 0 {
-		return 0, fmt.Errorf("procs: prctl(%d): %w", option, e)
-	}
-	return r, nil
-}
-
 // EnableSubreaper makes this process the parent of every descendant that
 // is orphaned below it, so a process the child left behind is visible as
 // a direct child here instead of vanishing under init. Start calls it;
 // callers may call it earlier.
 func EnableSubreaper() error {
-	_, err := prctl(prSetChildSubreaper, 1)
-	return err
+	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		return fmt.Errorf("procs: become subreaper: %w", err)
+	}
+	return nil
 }
 
 var subreaperOnce sync.Once
@@ -59,8 +48,8 @@ func ensureSubreaper() error {
 // a capable debugger attach regardless is outside this guard; the docs
 // say so.
 func DisableAttach() error {
-	if _, err := prctl(prSetDumpable, 0); err != nil {
-		return err
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("procs: refuse attachment: %w", err)
 	}
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		return fmt.Errorf("procs: disable core dumps: %w", err)
@@ -81,16 +70,26 @@ func DisableAttach() error {
 
 // dumpable reads the flag DisableAttach clears. Tests use it.
 func dumpable() (int, error) {
-	r, err := prctl(prGetDumpable, 0)
-	return int(r), err
+	return unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
 }
 
 // Containment is the receipt line that says how children are contained on
-// this platform and what is not covered.
-func Containment() string {
-	return "containment: session and process group, child subreaper, parent-death signal, descendants observed every second; " +
+// this platform and what is not covered, before any child has run. Each
+// child's own line, from Process.Containment, also says whether a cgroup
+// was in force for it.
+func Containment() string { return containmentFor(false) }
+
+// containmentFor is the receipt line with or without a cgroup.
+func containmentFor(cg bool) string {
+	mech := "session and process group, child subreaper, parent-death signal, descendants observed every second"
+	if cg {
+		mech = "cgroup (frozen then killed at teardown), " + mech
+	} else {
+		mech += ", no cgroup available"
+	}
+	return "containment: " + mech + "; " +
 		"not covered: work handed to a process outside the tool's view, a child that stops or kills the tool, " +
-		"a process that changes its pid faster than the process table is read"
+		"a process that leaves its cgroup and changes its pid faster than the process table is read"
 }
 
 // procInfo is what /proc/<pid>/stat says about one process.
@@ -189,10 +188,11 @@ func (t *tracker) childPid() int {
 }
 
 // scan builds the child's tree from one snapshot: the child while it is
-// the same process, every tracked process still the same process, and on
-// this platform every process reparented here from another session that
-// no other live child owns (how an orphan looks to a subreaper), then
-// everything below them by parent chain. True zombies this process
+// the same process, every tracked process still the same process, on this
+// platform every process reparented here from another session that no
+// other live child owns (how an orphan looks to a subreaper), and every
+// member of the child's cgroup when it has one, then everything below
+// them by parent chain. True zombies this process
 // parents and that are not live children are reaped. The walk is one pass
 // over a parent index, so the cost is linear in the table size.
 func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
@@ -240,6 +240,19 @@ func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
 		seed(pid)
 	}
 	live.Unlock()
+	// A process can leave its cgroup, so the cgroup adds to the rules
+	// above and never replaces them. A member missing from the snapshot
+	// exited between the two reads; the next pass sees it as a zombie or
+	// gone. Another live child is never attributed here.
+	if p.cg != nil {
+		if members, err := p.cg.members(); err == nil {
+			for _, pid := range members {
+				if _, ok := procs[pid]; ok && (pid == p.pid || !liveHas(pid)) {
+					seed(pid)
+				}
+			}
+		}
+	}
 	for len(queue) > 0 {
 		pid := queue[0]
 		queue = queue[1:]
@@ -270,16 +283,37 @@ func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
 	return alive, reaped, nil
 }
 
-// kill sends sig to pid only if it is still the tracked process.
+// kill sends sig to pid only if it is still the tracked process. The pidfd
+// is opened first, then the start time is checked, so a pid reused after
+// the open points the pidfd at the dead process and the signal is
+// harmless. A kernel without pidfd falls back to a check then kill.
 func (t *tracker) kill(pid int, sig syscall.Signal) error {
 	t.mu.Lock()
 	start, ok := t.tracked[pid]
 	t.mu.Unlock()
-	info, present := readStat(pid)
-	if !ok || !present || info.start != start {
+	if !ok {
 		return syscall.ESRCH
 	}
-	return syscall.Kill(pid, sig)
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		if !errors.Is(err, unix.ENOSYS) {
+			return syscall.ESRCH
+		}
+		info, present := readStat(pid)
+		if !present || info.start != start {
+			return syscall.ESRCH
+		}
+		return syscall.Kill(pid, sig)
+	}
+	defer unix.Close(fd)
+	info, present := readStat(pid)
+	if !present || info.start != start {
+		return syscall.ESRCH
+	}
+	if err := unix.PidfdSendSignal(fd, unix.Signal(sig), nil, 0); err != nil {
+		return err
+	}
+	return nil
 }
 
 // killGroup signals the child's process group while the child is still

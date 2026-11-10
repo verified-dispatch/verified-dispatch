@@ -3,15 +3,13 @@
 package procs
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // sysProcAttr puts the child in a new session and process group. macOS has
@@ -26,16 +24,13 @@ func EnableSubreaper() error { return nil }
 
 func ensureSubreaper() error { return nil }
 
-// ptDenyAttach is the ptrace request that refuses later attachment, from
-// <sys/ptrace.h>.
-const ptDenyAttach = 31
-
 // DisableAttach asks the kernel to refuse debugger attachment and stops
-// core dumps. The request goes through the raw system call interface,
-// which Apple does not support; a later batch moves it to the C library.
+// core dumps. If a debugger is attached already the kernel ends the
+// process, which is the right outcome for a tool that holds a key in
+// memory.
 func DisableAttach() error {
-	if _, _, e := syscall.Syscall6(syscall.SYS_PTRACE, ptDenyAttach, 0, 0, 0, 0, 0); e != 0 {
-		return fmt.Errorf("procs: ptrace(PT_DENY_ATTACH): %w", e)
+	if err := unix.PtraceDenyAttach(); err != nil {
+		return fmt.Errorf("procs: refuse attachment: %w", err)
 	}
 	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		return fmt.Errorf("procs: disable core dumps: %w", err)
@@ -45,65 +40,70 @@ func DisableAttach() error {
 
 // Containment is the receipt line that says how children are contained on
 // this platform and what is not covered.
-func Containment() string {
+func Containment() string { return containmentFor(false) }
+
+// containmentFor is the receipt line. macOS has no cgroup, so the line is
+// the same for every child.
+func containmentFor(bool) string {
 	return "containment: session and process group, descendants observed every second (1 s poll); " +
 		"not covered: work handed to a process outside the tool's view, a child that stops or kills the tool, " +
 		"a process that leaves the child's group and whose parent exits between two polls"
 }
 
-// psInfo is one line of ps output.
-type psInfo struct {
+// preKill has nothing to do on macOS, which has no cgroup.
+func (p *Process) preKill() {}
+
+// postKill has nothing to do on macOS, which has no cgroup.
+func (p *Process) postKill(time.Duration) error { return nil }
+
+// procInfo is one entry of the kernel's process table.
+type procInfo struct {
 	pid, ppid, pgid int
 	zombie          bool
-	start           string // lstart; with the pid it names one process
+	start           uint64 // start time in microseconds; with the pid it names one process
 }
 
-// psTimeout bounds one ps run so a stuck ps cannot hold a teardown past
-// its bound.
-const psTimeout = 5 * time.Second
+// szomb is the p_stat value of a zombie, from <sys/proc.h>.
+const szomb = 5
 
-// psSnapshot lists every process through /bin/ps by absolute path, so a
-// ps planted earlier on PATH is never run.
-func psSnapshot() (map[int]psInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), psTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "/bin/ps", "-axo", "pid=,ppid=,pgid=,stat=,lstart=").Output()
-	if err != nil {
-		return nil, fmt.Errorf("procs: ps: %w", err)
-	}
-	return parsePs(out), nil
-}
-
-func parsePs(out []byte) map[int]psInfo {
-	procs := map[int]psInfo{}
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 5 {
-			continue
+// fromKinfo converts the kernel's entries.
+func fromKinfo(kp []unix.KinfoProc) map[int]procInfo {
+	procs := make(map[int]procInfo, len(kp))
+	for _, k := range kp {
+		pid := int(k.Proc.P_pid)
+		procs[pid] = procInfo{
+			pid:    pid,
+			ppid:   int(k.Eproc.Ppid),
+			pgid:   int(k.Eproc.Pgid),
+			zombie: k.Proc.P_stat == szomb,
+			start:  uint64(k.Proc.P_starttime.Sec)*1_000_000 + uint64(k.Proc.P_starttime.Usec),
 		}
-		pid, err1 := strconv.Atoi(f[0])
-		ppid, err2 := strconv.Atoi(f[1])
-		pgid, err3 := strconv.Atoi(f[2])
-		if err1 != nil || err2 != nil || err3 != nil {
-			continue
-		}
-		procs[pid] = psInfo{pid: pid, ppid: ppid, pgid: pgid, zombie: strings.HasPrefix(f[3], "Z"), start: strings.Join(f[4:], " ")}
 	}
 	return procs
+}
+
+// snapshot reads the whole process table from the kernel, with no fork
+// and no dependence on PATH.
+func snapshot() (map[int]procInfo, error) {
+	kp, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, fmt.Errorf("procs: kern.proc.all: %w", err)
+	}
+	return fromKinfo(kp), nil
 }
 
 // tracker follows one child and its descendants by pid and start time.
 type tracker struct {
 	mu      sync.Mutex
 	pid     int
-	start   string
+	start   uint64 // the child's start time in microseconds
 	known   bool
-	tracked map[int]string
+	tracked map[int]uint64 // descendants seen so far, by pid and start time
 }
 
 func newTracker(p *Process) *tracker {
-	t := &tracker{pid: p.pid, tracked: map[int]string{}}
-	if procs, err := psSnapshot(); err == nil {
+	t := &tracker{pid: p.pid, tracked: map[int]uint64{}}
+	if procs, err := snapshot(); err == nil {
 		if info, ok := procs[p.pid]; ok {
 			t.start, t.known = info.start, true
 		}
@@ -112,7 +112,7 @@ func newTracker(p *Process) *tracker {
 }
 
 func (t *tracker) childAlive() bool {
-	procs, err := psSnapshot()
+	procs, err := snapshot()
 	if err != nil {
 		return false
 	}
@@ -120,7 +120,7 @@ func (t *tracker) childAlive() bool {
 	return ok && t.known && info.start == t.start && !info.zombie
 }
 
-// scan builds the child's tree from one ps snapshot: the child while it is
+// scan builds the child's tree from one snapshot: the child while it is
 // the same process, every tracked process still the same process, every
 // process in the child's group while the pid is not held by a different
 // process, every process in the child's session while the child is alive,
@@ -130,7 +130,7 @@ func (t *tracker) childAlive() bool {
 // with that id exists. macOS reaps orphans itself, so nothing is reaped
 // here.
 func (t *tracker) scan(p *Process) ([]liveProc, int, error) {
-	procs, err := psSnapshot()
+	procs, err := snapshot()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -211,7 +211,7 @@ func (t *tracker) kill(pid int, sig syscall.Signal) error {
 	if !ok {
 		return syscall.ESRCH
 	}
-	procs, err := psSnapshot()
+	procs, err := snapshot()
 	if err != nil {
 		return err
 	}
