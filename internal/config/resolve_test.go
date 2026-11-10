@@ -197,7 +197,7 @@ func TestLoadRefusesRepositoryEscalations(t *testing.T) {
 	wantRefusal(t, Inputs{Repo: []byte("[gate]\ncommand = \"x\"\n[redaction]\npatterns = [\"(\"]\n")}, "does not compile")
 	wantRefusal(t, Inputs{Repo: []byte("[gate]\ncommand = \"   \"\n")}, "empty command")
 	wantRefusal(t, Inputs{Repo: []byte("[gate]\ncommand = \"" + strings.Repeat("x", MaxCommandBytes+1) + "\"\n")}, "gate.command")
-	wantRefusal(t, Inputs{Repo: []byte("[gate\ncommand = \"x\"\n")}, "repository config")
+	wantPlainError(t, Inputs{Repo: []byte("[gate\ncommand = \"x\"\n")}, "repository config")
 	wantRefusal(t, Inputs{Repo: make([]byte, ConfigFileBytes+1)}, "larger than")
 	many := "[gate]\ncommand = \"x\"\n[condense]\npatterns = [" + strings.TrimSuffix(strings.Repeat("\"p\",", MaxPatterns+1), ",") + "]\n"
 	wantRefusal(t, Inputs{Repo: []byte(many)}, "condense.patterns")

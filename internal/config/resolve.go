@@ -75,7 +75,7 @@ func Load(in Inputs) (*Resolved, error) {
 		}
 		l, md, err := decodeLayer(in.Repo, "repository config")
 		if err != nil {
-			return nil, &Refusal{Reason: err.Error()}
+			return nil, err
 		}
 		if err := checkRepoKeys(md); err != nil {
 			return nil, err
